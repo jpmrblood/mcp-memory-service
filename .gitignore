@@ -139,3 +139,6 @@ yarn-debug.log*
 yarn-error.log*
 package-lock.json
 .npm
+
+# Opencode artifacts
+.opencode/
