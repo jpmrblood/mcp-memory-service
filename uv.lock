@@ -937,7 +937,7 @@ wheels = [
 
 [[package]]
 name = "mcp-memory-service"
-version = "6.13.7"
+version = "6.15.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
@@ -965,6 +965,10 @@ dependencies = [
 chromadb = [
     { name = "chromadb" },
 ]
+cpu = [
+    { name = "sentence-transformers" },
+    { name = "torch" },
+]
 ml = [
     { name = "sentence-transformers" },
     { name = "torch" },
@@ -989,17 +993,19 @@ requires-dist = [
     { name = "pypdf2", specifier = ">=3.0.0" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "sentence-transformers", specifier = ">=2.2.2" },
+    { name = "sentence-transformers", marker = "extra == 'cpu'", specifier = ">=2.2.2" },
     { name = "sentence-transformers", marker = "extra == 'ml'", specifier = ">=2.2.2" },
     { name = "sqlite-vec", specifier = ">=0.1.0" },
     { name = "sqlite-vec", marker = "extra == 'sqlite'", specifier = ">=0.1.0" },
     { name = "sse-starlette", specifier = ">=2.1.0" },
     { name = "tokenizers", specifier = "==0.20.3" },
     { name = "torch", specifier = ">=2.0.0" },
+    { name = "torch", marker = "extra == 'cpu'", specifier = ">=2.0.0" },
     { name = "torch", marker = "extra == 'ml'", specifier = ">=2.0.0" },
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "zeroconf", specifier = ">=0.130.0" },
 ]
-provides-extras = ["ml", "chromadb", "sqlite"]
+provides-extras = ["ml", "cpu", "chromadb", "sqlite"]
 
 [[package]]
 name = "mdurl"

@@ -60,6 +60,10 @@ ml = [
     "sentence-transformers>=2.2.2",
     "torch>=2.0.0"
 ]
+cpu = [
+    "sentence-transformers>=2.2.2",
+    "torch>=2.0.0"
+]
 chromadb = [
     "chromadb==0.5.23"
 ]
