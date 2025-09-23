@@ -61,7 +61,7 @@ ml = [
     "torch>=2.0.0"
 ]
 cpu = [
-    "sentence-transformers>=2.2.2",
+    "sentence-transformers[onnx]>=2.2.2",
     "torch>=2.0.0"
 ]
 chromadb = [
@@ -69,6 +69,16 @@ chromadb = [
 ]
 sqlite = [
     "sqlite-vec>=0.1.0"
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
 ]
 
 [project.scripts]
