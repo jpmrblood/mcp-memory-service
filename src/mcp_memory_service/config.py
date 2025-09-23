@@ -35,6 +35,17 @@ from pathlib import Path
 import time
 import logging
 
+# Load environment variables from .env file if it exists
+try:
+    from dotenv import load_dotenv
+    env_file = Path(__file__).parent.parent.parent / ".env"
+    if env_file.exists():
+        load_dotenv(env_file)
+        logging.getLogger(__name__).info(f"Loaded environment from {env_file}")
+except ImportError:
+    # dotenv not available, skip loading
+    pass
+
 logger = logging.getLogger(__name__)
 
 def validate_and_create_path(path: str) -> str:

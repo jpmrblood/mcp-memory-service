@@ -486,8 +486,9 @@ def detect_storage_backend_compatibility(system_info, gpu_info):
     print_step("3a", "Analyzing storage backend compatibility")
     
     compatibility = {
-        "chromadb": {"supported": True, "issues": [], "recommendation": "default"},
-        "sqlite_vec": {"supported": True, "issues": [], "recommendation": "lightweight"}
+        "cloudflare": {"supported": True, "issues": [], "recommendation": "production"},
+        "sqlite_vec": {"supported": True, "issues": [], "recommendation": "development"},
+        "chromadb": {"supported": True, "issues": [], "recommendation": "team"}
     }
     
     # Check ChromaDB compatibility issues
@@ -537,6 +538,9 @@ def detect_storage_backend_compatibility(system_info, gpu_info):
     for backend, info in compatibility.items():
         status = "✅" if info["supported"] else "❌"
         rec_text = {
+            "production": "☁️ PRODUCTION (Cloud)",
+            "development": "🪶 DEVELOPMENT (Local)",
+            "team": "👥 TEAM (Multi-client)",
             "recommended": "🌟 RECOMMENDED",
             "default": "📦 Standard",
             "problematic": "⚠️  May have issues",
@@ -574,45 +578,218 @@ def choose_storage_backend(system_info, gpu_info, args):
             break
     
     if not recommended_backend:
-        recommended_backend = "chromadb"  # Default fallback
-    
-    # Interactive selection if no auto-recommendation is clear
-    if compatibility["chromadb"]["recommendation"] == "problematic":
-        print_step("3b", "Storage Backend Selection")
-        print_info("Based on your system, ChromaDB may have installation issues.")
-        print_info("SQLite-vec is recommended as a lightweight, compatible alternative.")
-        print_info("")
-        print_info("Available options:")
-        print_info("  1. SQLite-vec (Recommended) - Lightweight, fast, minimal dependencies")
-        print_info("  2. ChromaDB (Standard) - Full-featured but may have issues on your system")
-        print_info("  3. Auto-detect - Try ChromaDB first, fallback to SQLite-vec if it fails")
-        print_info("")
-        
-        while True:
-            try:
-                choice = input("Choose storage backend [1-3] (default: 1): ").strip()
-                if not choice:
-                    choice = "1"
-                
-                if choice == "1":
-                    return "sqlite_vec"
-                elif choice == "2":
-                    return "chromadb"
-                elif choice == "3":
-                    return "auto_detect"
-                else:
-                    print_error("Please enter 1, 2, or 3")
-            except (EOFError, KeyboardInterrupt):
-                print_info("\nUsing recommended backend: sqlite_vec")
+        recommended_backend = "sqlite_vec"  # Default fallback for local development
+
+    # Interactive backend selection
+    print_step("3b", "Storage Backend Selection")
+    print_info("Choose the storage backend that best fits your use case:")
+    print_info("")
+    print_info("Usage scenarios:")
+    print_info("  1. Production/Shared (Cloudflare) - Cloud storage, multi-user access, requires credentials")
+    print_info("  2. Development/Personal (SQLite-vec) - Local, lightweight, single-user")
+    print_info("  3. Team/Multi-client (ChromaDB) - Local server, multiple clients")
+    print_info("  4. Auto-detect - Try optimal backend based on your system")
+    print_info("")
+
+    # Show compatibility analysis
+    for i, (backend, info) in enumerate(compatibility.items(), 1):
+        if backend == "auto_detect":
+            continue
+        status = "✅" if info["supported"] else "❌"
+        rec_text = {
+            "production": "☁️ PRODUCTION (Cloud)",
+            "development": "🪶 DEVELOPMENT (Local)",
+            "team": "👥 TEAM (Multi-client)",
+            "recommended": "🌟 RECOMMENDED",
+            "problematic": "⚠️  May have issues"
+        }.get(info["recommendation"], "")
+        print_info(f"  {status} {i}. {backend.upper()}: {rec_text}")
+        if info["issues"]:
+            for issue in info["issues"]:
+                print_info(f"     • {issue}")
+
+    print_info("")
+    default_choice = "2" if compatibility["chromadb"]["recommendation"] == "problematic" else "2"
+
+    while True:
+        try:
+            choice = input(f"Choose storage backend [1-4] (default: {default_choice}): ").strip()
+            if not choice:
+                choice = default_choice
+
+            if choice == "1":
+                return "cloudflare"
+            elif choice == "2":
                 return "sqlite_vec"
-    
-    return recommended_backend
+            elif choice == "3":
+                return "chromadb"
+            elif choice == "4":
+                return "auto_detect"
+            else:
+                print_error("Please enter 1, 2, 3, or 4")
+        except (EOFError, KeyboardInterrupt):
+            print_info(f"\nUsing recommended backend: sqlite_vec")
+            return "sqlite_vec"
+
+def setup_cloudflare_credentials():
+    """Interactive setup of Cloudflare credentials."""
+    print_step("3c", "Cloudflare Backend Setup")
+    print_info("Cloudflare backend requires API credentials for D1 database and Vectorize index.")
+    print_info("You'll need:")
+    print_info("  • Cloudflare API Token (with D1 and Vectorize permissions)")
+    print_info("  • Account ID")
+    print_info("  • D1 Database ID")
+    print_info("  • Vectorize Index name")
+    print_info("")
+    print_info("Visit https://dash.cloudflare.com to get these credentials.")
+    print_info("")
+
+    credentials = {}
+
+    try:
+        # Get API Token
+        while True:
+            token = input("Enter Cloudflare API Token: ").strip()
+            if token:
+                credentials['CLOUDFLARE_API_TOKEN'] = token
+                break
+            print_error("API token is required")
+
+        # Get Account ID
+        while True:
+            account_id = input("Enter Cloudflare Account ID: ").strip()
+            if account_id:
+                credentials['CLOUDFLARE_ACCOUNT_ID'] = account_id
+                break
+            print_error("Account ID is required")
+
+        # Get D1 Database ID
+        while True:
+            d1_id = input("Enter D1 Database ID: ").strip()
+            if d1_id:
+                credentials['CLOUDFLARE_D1_DATABASE_ID'] = d1_id
+                break
+            print_error("D1 Database ID is required")
+
+        # Get Vectorize Index
+        vectorize_index = input("Enter Vectorize Index name (default: mcp-memory-index): ").strip()
+        if not vectorize_index:
+            vectorize_index = "mcp-memory-index"
+        credentials['CLOUDFLARE_VECTORIZE_INDEX'] = vectorize_index
+
+        # Set storage backend
+        credentials['MCP_MEMORY_STORAGE_BACKEND'] = 'cloudflare'
+
+        return credentials
+
+    except (EOFError, KeyboardInterrupt):
+        print_info("\nCloudflare setup cancelled.")
+        return None
+
+def save_credentials_to_env(credentials):
+    """Save credentials to .env file."""
+    env_file = Path('.env')
+
+    # Read existing .env content if it exists
+    existing_lines = []
+    if env_file.exists():
+        with open(env_file, 'r') as f:
+            existing_lines = f.readlines()
+
+    # Filter out any existing Cloudflare variables
+    filtered_lines = [
+        line for line in existing_lines
+        if not any(key in line for key in credentials.keys())
+    ]
+
+    # Add new credentials
+    with open(env_file, 'w') as f:
+        # Write existing non-Cloudflare lines
+        f.writelines(filtered_lines)
+
+        # Add separator if file wasn't empty
+        if filtered_lines and not filtered_lines[-1].endswith('\n'):
+            f.write('\n')
+        if filtered_lines:
+            f.write('\n# Cloudflare Backend Configuration\n')
+
+        # Write Cloudflare credentials
+        for key, value in credentials.items():
+            f.write(f'{key}={value}\n')
+
+    print_success(f"Credentials saved to .env file")
+
+def test_cloudflare_connection(credentials):
+    """Test Cloudflare API connection."""
+    print_info("Testing Cloudflare API connection...")
+
+    try:
+        import requests
+
+        headers = {
+            'Authorization': f"Bearer {credentials['CLOUDFLARE_API_TOKEN']}",
+            'Content-Type': 'application/json'
+        }
+
+        # Test API token validity
+        response = requests.get(
+            "https://api.cloudflare.com/client/v4/user/tokens/verify",
+            headers=headers,
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("success"):
+                print_success("API token is valid")
+                return True
+            else:
+                print_error(f"API token validation failed: {data.get('errors')}")
+                return False
+        else:
+            print_error(f"API connection failed with status {response.status_code}")
+            return False
+
+    except ImportError:
+        print_warning("Could not test connection (requests not installed)")
+        print_info("Connection will be tested when the service starts")
+        return True
+    except Exception as e:
+        print_warning(f"Could not test connection: {e}")
+        print_info("Connection will be tested when the service starts")
+        return True
 
 def install_storage_backend(backend, system_info):
     """Install the chosen storage backend."""
     print_step("3c", f"Installing {backend} storage backend")
-    
-    if backend == "sqlite_vec":
+
+    if backend == "cloudflare":
+        print_info("Cloudflare backend uses cloud services - no local dependencies needed")
+
+        # Setup credentials interactively
+        credentials = setup_cloudflare_credentials()
+        if not credentials:
+            print_warning("Cloudflare setup cancelled. Falling back to SQLite-vec.")
+            return install_storage_backend("sqlite_vec", system_info)
+
+        # Save credentials to .env file
+        save_credentials_to_env(credentials)
+
+        # Test connection
+        connection_ok = test_cloudflare_connection(credentials)
+        if connection_ok:
+            print_success("Cloudflare backend configured successfully")
+            return "cloudflare"
+        else:
+            print_warning("Cloudflare connection test failed. You can continue and fix credentials later.")
+            fallback = input("Continue with Cloudflare anyway? [y/N]: ").strip().lower()
+            if fallback.startswith('y'):
+                return "cloudflare"
+            else:
+                print_info("Falling back to SQLite-vec for local development.")
+                return install_storage_backend("sqlite_vec", system_info)
+
+    elif backend == "sqlite_vec":
         try:
             print_info("Installing SQLite-vec...")
             subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'sqlite-vec'])
@@ -636,19 +813,22 @@ def install_storage_backend(backend, system_info):
             
     elif backend == "auto_detect":
         print_info("Attempting auto-detection...")
-        
-        # Try ChromaDB first
-        print_info("Trying ChromaDB installation...")
-        if install_storage_backend("chromadb", system_info):
-            print_success("ChromaDB installed successfully")
-            return "chromadb"
-        
-        print_warning("ChromaDB installation failed, falling back to SQLite-vec...")
+        print_info("Auto-detect will prioritize local backends (SQLite-vec, ChromaDB)")
+        print_info("For production use, manually select Cloudflare backend.")
+
+        # For auto-detect, try SQLite-vec first (most reliable)
+        print_info("Trying SQLite-vec installation...")
         if install_storage_backend("sqlite_vec", system_info):
-            print_success("SQLite-vec installed successfully as fallback")
+            print_success("SQLite-vec installed successfully")
             return "sqlite_vec"
-        
-        print_error("Both storage backends failed to install")
+
+        print_warning("SQLite-vec installation failed, trying ChromaDB...")
+        if install_storage_backend("chromadb", system_info):
+            print_success("ChromaDB installed successfully as fallback")
+            return "chromadb"
+
+        print_error("All local storage backends failed to install")
+        print_info("Consider manually configuring Cloudflare backend for production use")
         return False
     
     return False
@@ -1151,8 +1331,8 @@ def main():
                         help='Force compatible versions of PyTorch (2.0.1) and sentence-transformers (2.2.2)')
     parser.add_argument('--fallback-deps', action='store_true',
                         help='Use fallback versions of PyTorch (1.13.1) and sentence-transformers (2.2.2)')
-    parser.add_argument('--storage-backend', choices=['chromadb', 'sqlite_vec', 'auto_detect'],
-                        help='Choose storage backend: chromadb (default), sqlite_vec (lightweight), or auto_detect (try chromadb, fallback to sqlite_vec)')
+    parser.add_argument('--storage-backend', choices=['cloudflare', 'sqlite_vec', 'chromadb', 'auto_detect'],
+                        help='Choose storage backend: cloudflare (production), sqlite_vec (development), chromadb (team), or auto_detect')
     parser.add_argument('--skip-pytorch', action='store_true',
                         help='Skip PyTorch installation and use ONNX runtime with SQLite-vec backend instead')
     parser.add_argument('--use-homebrew-pytorch', action='store_true',

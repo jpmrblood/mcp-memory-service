@@ -132,13 +132,16 @@ SESSION_MEMORY_2025-08-11.md
 # Git tools
 .git-rewrite/
 
-# Node.js dependencies and artifacts
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-package-lock.json
-.npm
+ # Node.js dependencies and artifacts
+ node_modules/
+ npm-debug.log*
+ yarn-debug.log*
+ yarn-error.log*
+ package-lock.json
+ .npm
 
-# Opencode artifacts
-.opencode/
+ # Opencode artifacts
+ .opencode/
+
+ # MCP config artifacts
+ .mcp.json.disabled

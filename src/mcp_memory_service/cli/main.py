@@ -46,23 +46,23 @@ def cli(ctx):
             stacklevel=2
         )
         # Default to server command with default options for backward compatibility
-        ctx.invoke(server, debug=False, chroma_path=None, storage_backend='sqlite_vec')
+        ctx.invoke(server, debug=False, chroma_path=None, storage_backend=None)
 
 
 @cli.command()
 @click.option('--debug', is_flag=True, help='Enable debug logging')
 @click.option('--chroma-path', type=str, help='Path to ChromaDB storage')
-@click.option('--storage-backend', '-s', default='sqlite_vec', 
-              type=click.Choice(['sqlite_vec', 'chromadb', 'cloudflare']), help='Storage backend to use')
+@click.option('--storage-backend', '-s', default=None,
+              type=click.Choice(['sqlite_vec', 'chromadb', 'cloudflare']), help='Storage backend to use (defaults to environment or sqlite_vec)')
 def server(debug, chroma_path, storage_backend):
     """
     Start the MCP Memory Service server.
-    
+
     This starts the Model Context Protocol server that can be used by
     Claude Desktop, VS Code extensions, and other MCP-compatible clients.
     """
-    # Set environment variables if provided
-    if storage_backend:
+    # Set environment variables if explicitly provided
+    if storage_backend is not None:
         os.environ['MCP_MEMORY_STORAGE_BACKEND'] = storage_backend
     if chroma_path:
         os.environ['MCP_MEMORY_CHROMA_PATH'] = chroma_path

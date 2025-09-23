@@ -4,6 +4,90 @@ All notable changes to the MCP Memory Service project will be documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.17.0] - 2025-09-22
+
+### 🚀 **Enhanced Installer with Cloudflare Backend Support**
+
+#### Major Installer Improvements
+- **Added Cloudflare backend to installer**: Full support for cloud-first installation workflow
+  - **Interactive credential setup**: Guided collection of API token, Account ID, D1 database, and Vectorize index
+  - **Automatic .env generation**: Securely saves credentials to project environment file
+  - **Connection testing**: Validates Cloudflare API during installation process
+  - **Graceful fallbacks**: Falls back to local backends if cloud setup fails
+- **Enhanced backend selection logic**: Usage-based recommendations for optimal backend choice
+  - **Production scenarios**: Cloudflare for shared access and cloud storage
+  - **Development scenarios**: SQLite-vec for single-user, lightweight setup
+  - **Team scenarios**: ChromaDB for multi-client local collaboration
+- **Improved CLI options**: Updated `--storage-backend` with clear use case descriptions
+  - **New choices**: `cloudflare` (production), `sqlite_vec` (development), `chromadb` (team), `auto_detect`
+  - **Better help text**: Explains when to use each backend option
+
+#### User Experience Enhancements
+- **Interactive backend selection**: Guided setup with compatibility analysis and recommendations
+- **Clear usage guidance**: Backend selection now includes use case scenarios and performance characteristics
+- **Enhanced auto-detection**: Prioritizes most reliable backends for the detected system
+- **Comprehensive documentation**: Updated installation commands and backend comparison table
+
+#### Technical Improvements
+- **Robust error handling**: Comprehensive fallback mechanisms for failed setups
+- **Modular design**: Separate functions for credential collection, validation, and environment setup
+- **Connection validation**: Real-time API testing during Cloudflare backend configuration
+- **Environment file management**: Smart .env file handling that preserves existing settings
+
+#### Benefits for Users
+- **Seamless production setup**: Single command path from installation to Cloudflare backend
+- **Reduced configuration errors**: Automated credential setup eliminates manual .env file creation
+- **Better backend choice**: Clear guidance helps users select optimal storage for their use case
+- **Improved reliability**: Fallback mechanisms ensure installation succeeds even with setup issues
+
+## [6.16.1] - 2025-09-22
+
+### 🔧 **Docker Build Hotfix**
+
+#### Infrastructure Fix
+- **Fixed Docker build failure**: Updated Dockerfile script path after v6.15.0 scripts reorganization
+  - **Issue**: Docker build failing due to `scripts/install_uv.py` not found
+  - **Solution**: Updated path to `scripts/installation/install_uv.py`
+  - **Impact**: Restores automated Docker publishing workflows
+- **No functional changes**: Pure infrastructure fix for CI/CD
+
+## [6.16.0] - 2025-09-22
+
+### 🔧 **Configuration Management & Backend Selection Fixes**
+
+#### Critical Configuration Issues Resolved
+- **Fixed Cloudflare backend fallback issue**: Resolved service falling back to SQLite-vec despite correct Cloudflare configuration
+  - **Root cause**: Configuration module wasn't loading `.env` file automatically
+  - **CLI override issue**: CLI default parameter was overriding environment variables
+  - **Solution**: Added automatic `.env` loading and fixed CLI parameter precedence
+- **Enhanced environment loading**: Added `load_dotenv()` to configuration initialization
+  - **Automatic detection**: Config module now automatically loads `.env` file when present
+  - **Backward compatibility**: Graceful fallback if python-dotenv not available
+  - **Logging**: Added confirmation logging when environment file is loaded
+- **Fixed CLI parameter precedence**: Changed CLI defaults to respect environment configuration
+  - **Server command**: Changed `--storage-backend` default from `'sqlite_vec'` to `None`
+  - **Environment priority**: Environment variables now take precedence over CLI defaults
+  - **Explicit overrides**: CLI parameters only override when explicitly provided
+
+#### Content Size Management Improvements
+- **Added Cloudflare content limits to context provider**: Enhanced memory management guidance
+  - **Content size warnings**: Added ~1500 character limit documentation
+  - **Embedding model constraints**: Documented `@cf/baai/bge-base-en-v1.5` strict input limits
+  - **Best practices**: Guidance for chunking large content and using document ingestion
+  - **Error recognition**: Help identifying "Failed to store vector" errors from size issues
+- **Enhanced troubleshooting**: Better error messages and debugging capabilities for configuration issues
+
+#### Technical Improvements
+- **Configuration validation**: Improved environment variable loading and validation
+- **Error handling**: Better error messages when storage backend initialization fails
+- **Documentation**: Updated context provider with Cloudflare-specific constraints and best practices
+
+#### Benefits for Users
+- **Seamless backend switching**: Cloudflare configuration now works reliably out of the box
+- **Fewer configuration errors**: Automatic environment loading reduces setup friction
+- **Better error diagnosis**: Clear guidance on content size limits and chunking strategies
+- **Improved reliability**: Configuration precedence issues eliminated
+
 ## [6.15.1] - 2025-09-22
 
 ### 🔧 **Enhanced Cloudflare Backend Initialization & Diagnostics**

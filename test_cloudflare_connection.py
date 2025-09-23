@@ -5,14 +5,14 @@ import os
 import sys
 import requests
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Add the project directory to path
-project_dir = Path(__file__).parent.parent
+project_dir = Path(__file__).parent
 sys.path.insert(0, str(project_dir / "src"))
 
-# Load environment
-os.chdir(project_dir)
-from mcp_memory_service import env_loader
+# Load environment from .env file
+load_dotenv()
 
 # Now test the configuration
 print("=== Cloudflare Configuration Test ===")

@@ -12,7 +12,8 @@ MCP Memory Service is a Model Context Protocol server providing semantic memory 
 
 ```bash
 # Setup & Development
-python install.py                              # Platform-aware installation
+python scripts/installation/install.py         # Platform-aware installation with backend selection
+python scripts/installation/install.py --storage-backend cloudflare  # Direct Cloudflare setup
 uv run memory server                           # Start server (v6.3.0+ consolidated CLI)
 pytest tests/                                 # Run tests
 python scripts/validation/verify_environment.py # Check environment
@@ -75,17 +76,25 @@ export MCP_API_KEY="$(openssl rand -base64 32)" # Generate secure API key
 
 **Configuration Precedence:** Global Claude Config > .env file > Environment variables
 
+**✅ Automatic Configuration Loading (v6.16.0+):** The service now automatically loads `.env` files and respects environment variable precedence. CLI defaults no longer override environment configuration.
+
 **⚠️  Important:** This system uses **Cloudflare as the primary backend**. Local SQLite is only for development/testing.
 
 **Platform Support:** macOS (MPS/CPU), Windows (CUDA/DirectML/CPU), Linux (CUDA/ROCm/CPU)
 
 ## Storage Backends
 
-| Backend | Performance | Use Case |
-|---------|-------------|----------|
-| SQLite-Vec | Fast (5ms read) | Development, single-client |
-| ChromaDB | Medium (15ms read) | Multi-client, team collaboration |
-| Cloudflare | Network dependent | Production, global scale |
+| Backend | Performance | Use Case | Installation |
+|---------|-------------|----------|--------------|
+| **Cloudflare** ☁️ | Network dependent | **Production, shared access** | `install.py --storage-backend cloudflare` |
+| SQLite-Vec 🪶 | Fast (5ms read) | Development, single-user | `install.py --storage-backend sqlite_vec` |
+| ChromaDB 👥 | Medium (15ms read) | Team, multi-client local | `install.py --storage-backend chromadb` |
+
+**v6.16.0+ Installer Enhancements:**
+- **Interactive backend selection** with usage-based recommendations
+- **Automatic Cloudflare credential setup** and `.env` file generation
+- **Connection testing** during installation to validate configuration
+- **Graceful fallbacks** from cloud to local backends if setup fails
 
 ## Development Guidelines
 
@@ -118,11 +127,17 @@ python validate_config.py --fix              # Auto-fix common issues (future)
 - **Project Environment**: `.env` file (Cloudflare credentials only)
 - **No Local Overrides**: Project `.mcp.json` should NOT contain memory server config
 
-**Common Configuration Issues:**
+**Common Configuration Issues (Pre-v6.16.0):**
+- **✅ FIXED**: CLI defaults overriding environment variables
+- **✅ FIXED**: Manual .env file loading required
 - **Multiple Backends**: Conflicting SQLite/Cloudflare configurations
 - **Credential Conflicts**: Old macOS paths or missing Cloudflare credentials
 - **Cache Issues**: Restart Claude Code to refresh MCP connections
-- **Environment Confusion**: Check precedence: Global > .env > shell variables
+
+**v6.16.0+ Configuration Benefits:**
+- **Automatic .env loading**: No manual configuration required
+- **Proper precedence**: Environment variables respected over CLI defaults
+- **Better error messages**: Clear indication of configuration loading issues
 
 **Cloudflare Backend Troubleshooting:**
 - **Enhanced Initialization Logging**: Look for these indicators in Claude Desktop logs:
