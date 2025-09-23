@@ -7,7 +7,7 @@ services:
   mcp-memory-service:
     build:
       context: ../..
-      dockerfile: tools/docker/Dockerfile
+      dockerfile: tools/docker/Dockerfile.cpu
     ports:
       - "${HTTP_PORT:-8000}:8000"  # Map to different port if needed
     volumes:
