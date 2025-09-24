@@ -24,6 +24,9 @@ claude /memory-store "content"                 # Store information
 claude /memory-recall "query"                  # Retrieve information
 claude /memory-health                         # Check service status
 
+# Configuration Validation
+python scripts/validation/diagnose_backend_config.py  # Validate Cloudflare configuration
+
 # Backend Synchronization
 python scripts/sync/sync_memory_backends.py --status    # Check sync status
 python scripts/sync/sync_memory_backends.py --dry-run   # Preview sync
@@ -78,7 +81,7 @@ export MCP_API_KEY="$(openssl rand -base64 32)" # Generate secure API key
 
 **✅ Automatic Configuration Loading (v6.16.0+):** The service now automatically loads `.env` files and respects environment variable precedence. CLI defaults no longer override environment configuration.
 
-**⚠️  Important:** This system uses **Cloudflare as the primary backend**. Local SQLite is only for development/testing.
+**⚠️  Important:** This system uses **Cloudflare as the primary backend**. If health checks show SQLite-vec instead of Cloudflare, this indicates a configuration issue that needs to be resolved.
 
 **Platform Support:** macOS (MPS/CPU), Windows (CUDA/DirectML/CPU), Linux (CUDA/ROCm/CPU)
 
@@ -151,10 +154,24 @@ python validate_config.py --fix              # Auto-fix common issues (future)
   - Configuration validation: Environment variables are logged during startup
   - Network timeouts: Enhanced error messages show specific Cloudflare API failures
 
+**Dual Environment Setup (Claude Desktop + Claude Code):**
+```bash
+# Quick setup for both environments - see docs/quick-setup-cloudflare-dual-environment.md
+python scripts/validation/diagnose_backend_config.py  # Validate Cloudflare configuration
+claude mcp list                             # Check Claude Code MCP servers
+```
+
+**Troubleshooting Health Check Showing Wrong Backend:**
+```bash
+# If health check shows "sqlite-vec" instead of "cloudflare":
+python scripts/validation/diagnose_backend_config.py  # Check configuration
+claude mcp remove memory && claude mcp add memory python -e MCP_MEMORY_STORAGE_BACKEND=cloudflare -e CLOUDFLARE_API_TOKEN=your-token -- -m mcp_memory_service.server
+```
+
 **Emergency Debugging:**
 ```bash
 /mcp                                         # Check active MCP servers in Claude
-python validate_config.py                   # Run configuration validation
+python scripts/validation/diagnose_backend_config.py  # Run configuration validation
 rm -f .mcp.json                             # Remove conflicting local MCP config
 python debug_server_initialization.py       # Test initialization flows (v6.15.1+)
 tail -50 ~/Library/Logs/Claude/mcp-server-memory.log | grep -E "(🚀|☁️|✅|❌)" # View enhanced logs

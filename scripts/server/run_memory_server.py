@@ -77,18 +77,28 @@ def run_memory_server():
     try:
         # Get the directory of this script
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        parent_dir = os.path.dirname(script_dir)
-        
-        # Add src directory to path if it exists
-        src_dir = os.path.join(parent_dir, "src")
-        if os.path.exists(src_dir) and src_dir not in sys.path:
-            print_info(f"Adding {src_dir} to sys.path")
+        # Go up two directories from scripts/server/ to reach the project root
+        project_root = os.path.dirname(os.path.dirname(script_dir))
+
+        # Add src directory to path if it exists (prioritize local development)
+        src_dir = os.path.join(project_root, "src")
+        if os.path.exists(src_dir):
+            print_info(f"Adding {src_dir} to sys.path (prioritized for development)")
+            # Remove any existing mcp_memory_service from sys.modules to avoid conflicts
+            modules_to_remove = [key for key in sys.modules.keys() if key.startswith('mcp_memory_service')]
+            for module in modules_to_remove:
+                print_info(f"Removing conflicting module: {module}")
+                del sys.modules[module]
+
+            # Insert src at the very beginning to override any installed packages
+            if src_dir in sys.path:
+                sys.path.remove(src_dir)
             sys.path.insert(0, src_dir)
-        
-        # Add site-packages to sys.path
-        site_packages = os.path.join(sys.prefix, 'Lib', 'site-packages')
-        if site_packages not in sys.path:
-            sys.path.insert(0, site_packages)
+        else:
+            # Add site-packages to sys.path only if src doesn't exist
+            site_packages = os.path.join(sys.prefix, 'Lib', 'site-packages')
+            if site_packages not in sys.path:
+                sys.path.insert(0, site_packages)
         
         # Try direct import from src directory
         server_path = os.path.join(src_dir, "mcp_memory_service", "server.py")

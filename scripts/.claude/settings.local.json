@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__code-context__index_codebase"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -4,6 +4,99 @@ All notable changes to the MCP Memory Service project will be documented in this
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.18.0] - 2025-09-23
+
+### 🚀 **Cloudflare Dual-Environment Configuration Suite**
+
+#### New Diagnostic Tools
+- **Added comprehensive backend configuration diagnostic script** (`scripts/validation/diagnose_backend_config.py`)
+  - Environment file validation with masked sensitive data display
+  - Environment variable loading verification with dotenv support
+  - Configuration module import testing with clear error reporting
+  - Storage backend creation testing with full traceback on failures
+  - Status indicators with clear success/warning/error messaging
+- **Enhanced troubleshooting workflow** with step-by-step validation process
+
+#### Documentation Improvements
+- **Created streamlined 5-minute setup guide** (`docs/quick-setup-cloudflare-dual-environment.md`)
+  - Comprehensive dual-environment configuration for Claude Desktop + Claude Code
+  - Configuration templates with explicit environment variable examples
+  - Validation commands with expected health check results
+  - Troubleshooting section for common configuration issues
+  - Migration guide from SQLite-vec to Cloudflare backend
+- **Fixed incorrect CLAUDE.md documentation** that suggested SQLite-vec as "expected behavior"
+- **Added configuration management best practices** with environment variable precedence
+- **Enhanced troubleshooting sections** with specific solutions for environment variable loading issues
+
+#### Configuration Enhancements
+- **Improved environment variable loading reliability** with explicit MCP server configuration
+- **Added execution context guidance** for different environments (Claude Desktop vs Claude Code)
+- **Enhanced working directory awareness** for proper .env file loading
+- **Better configuration validation** with clear error messages for missing required variables
+
+#### Technical Improvements
+- **Unified diagnostic approach** for both Cloudflare and SQLite-vec backends
+- **Enhanced error reporting** with masked sensitive data for security
+- **Improved configuration precedence handling** between global and project settings
+- **Better cross-platform path handling** for Windows environments
+
+#### Benefits for Users
+- **Eliminates configuration confusion** between different execution environments
+- **Provides clear validation tools** to quickly identify and resolve setup issues
+- **Ensures consistent backend usage** across Claude Desktop and Claude Code
+- **Streamlines Cloudflare backend adoption** with comprehensive setup guidance
+- **Reduces setup time** from complex debugging to 5-minute guided process
+
+## [6.17.2] - 2025-09-23
+
+### 🔧 **Development Environment Stability Fix**
+
+#### Module Isolation Improvements
+- **Enhanced script module loading** in `scripts/server/run_memory_server.py` to prevent version conflicts
+- **Added module cache clearing** to remove conflicting cached imports before loading local development code
+- **Improved path prioritization** to ensure local `src/` directory takes precedence over installed packages
+- **Better logging** shows exactly which modules are being cleared and paths being added for debugging
+
+#### Technical Improvements
+- **Prevents import conflicts** between development code and installed package versions
+- **Ensures consistent behavior** when switching between development and production environments
+- **Fixes version mismatch issues** that could cause `ImportError` for missing attributes like `INCLUDE_HOSTNAME`
+- **More robust script execution** with conditional path management based on environment
+
+#### Benefits for Developers
+- **Reliable development environment** - Local changes always take precedence
+- **Easier debugging** - Clear logging of module loading process
+- **Consistent Cloudflare backend** - No more fallback to ChromaDB due to version conflicts
+- **Zero breaking changes** - Maintains compatibility with all existing configurations
+
+## [6.17.1] - 2025-09-23
+
+### 🔧 **Script Reorganization Compatibility Hotfix**
+
+#### Backward Compatibility Added
+- **Added compatibility stub** at `scripts/run_memory_server.py` that redirects to new location with helpful migration notices
+- **Updated configuration templates** to use Python module approach as primary method for maximum stability
+- **Added comprehensive migration documentation** for users updating from pre-v6.17.0 versions
+- **Zero disruption approach**: Existing configurations continue working immediately
+
+#### Recommended Launch Methods (in order of stability)
+1. **`python -m mcp_memory_service.server`** - Most stable, no path dependencies, works across all reorganizations
+2. **`uv run memory server`** - Integrated with UV tooling, already documented as preferred
+3. **`scripts/server/run_memory_server.py`** - Direct script execution at new location
+4. **`scripts/run_memory_server.py`** - Legacy location with backward compatibility (shows migration notice)
+
+#### Documentation Improvements
+- **Enhanced README**: Clear migration notice with multiple working options
+- **Updated examples**: Python module approach as primary recommendation
+- **Migration guide**: Created comprehensive GitHub issue ([#108](https://github.com/doobidoo/mcp-memory-service/issues/108)) with all approaches
+- **Template updates**: Configuration templates now show most stable approaches first
+
+#### Why This Approach
+- **Immediate relief**: No users are blocked during v6.17.0 update
+- **Multiple pathways**: Users can choose the approach that fits their setup
+- **Future-proof**: Python module approach survives any future directory changes
+- **Clear migration path**: Informational notices guide users to better practices without forcing changes
+
 ## [6.17.0] - 2025-09-22
 
 ### 🚀 **Enhanced Installer with Cloudflare Backend Support**

@@ -38,6 +38,14 @@ docker-compose -f docker-compose.http.yml up -d
 npx -y @smithery/cli install @doobidoo/mcp-memory-service --client claude
 ```
 
+## ⚠️ v6.17.0+ Script Migration Notice
+
+**Updating from an older version?** Scripts have been reorganized for better maintainability:
+- **Recommended**: Use `python -m mcp_memory_service.server` in your Claude Desktop config (no path dependencies!)
+- **Alternative 1**: Use `uv run memory server` with UV tooling
+- **Alternative 2**: Update path from `scripts/run_memory_server.py` to `scripts/server/run_memory_server.py`
+- **Backward compatible**: Old path still works with a migration notice
+
 ## ⚠️ First-Time Setup Expectations
 
 On your first run, you'll see some warnings that are **completely normal**:
@@ -129,14 +137,43 @@ uv run memory health
 ## 🔧 Configuration
 
 ### Claude Desktop Integration
-Add to your Claude Desktop config (`~/.claude/config.json`):
+**Recommended approach** - Add to your Claude Desktop config (`~/.claude/config.json`):
 
 ```json
 {
   "mcpServers": {
     "memory": {
+      "command": "python",
+      "args": ["-m", "mcp_memory_service.server"],
+      "env": {
+        "MCP_MEMORY_STORAGE_BACKEND": "sqlite_vec"
+      }
+    }
+  }
+}
+```
+
+**Alternative approaches:**
+```json
+// Option 1: UV tooling (if using UV)
+{
+  "mcpServers": {
+    "memory": {
       "command": "uv",
       "args": ["--directory", "/path/to/mcp-memory-service", "run", "memory", "server"],
+      "env": {
+        "MCP_MEMORY_STORAGE_BACKEND": "sqlite_vec"
+      }
+    }
+  }
+}
+
+// Option 2: Direct script path (v6.17.0+)
+{
+  "mcpServers": {
+    "memory": {
+      "command": "python",
+      "args": ["/path/to/mcp-memory-service/scripts/server/run_memory_server.py"],
       "env": {
         "MCP_MEMORY_STORAGE_BACKEND": "sqlite_vec"
       }

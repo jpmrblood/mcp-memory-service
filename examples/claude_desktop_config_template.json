@@ -1,11 +1,19 @@
 {
   "mcpServers": {
     "memory": {
-      "command": "${PYTHON_PATH}",
+      "_comment": "Recommended: Use Python module approach (most stable, no path dependencies)",
+      "command": "python",
       "args": [
-        "${PROJECT_PATH}/scripts/run_memory_server.py"
+        "-m",
+        "mcp_memory_service.server"
+      ],
+      "_alternative_approaches": [
+        "Option 1 (UV): command='uv', args=['--directory', '${PROJECT_PATH}', 'run', 'memory', 'server']",
+        "Option 2 (New script path): command='python', args=['${PROJECT_PATH}/scripts/server/run_memory_server.py']",
+        "Option 3 (Legacy, shows migration notice): command='python', args=['${PROJECT_PATH}/scripts/run_memory_server.py']"
       ],
       "env": {
+        "MCP_MEMORY_STORAGE_BACKEND": "sqlite_vec",
         "MCP_MEMORY_CHROMA_PATH": "${USER_DATA_PATH}/mcp-memory/chroma_db",
         "MCP_MEMORY_BACKUPS_PATH": "${USER_DATA_PATH}/mcp-memory/backups",
         "PYTORCH_ENABLE_MPS_FALLBACK": "1",

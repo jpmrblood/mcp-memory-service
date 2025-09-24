@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(/C:\\Users\\heinrich.krupp/**)",
+      "Bash(node:*)",
+      "Bash(git tag:*)",
+      "Bash(echo $MCP_MEMORY_STORAGE_BACKEND)",
+      "Bash(git push:*)",
+      "Bash(python:*)",
+      "Bash(gh issue view:*)",
+      "mcp__memory__store_memory",
+      "Bash(install_claude_hooks_windows.bat)",
+      "Bash(C:REPOSITORIESmcp-memory-serviceclaude-hooksinstall_claude_hooks_windows.bat)",
+      "Bash(cmd /c:*)",
+      "Bash(powershell:*)",
+      "Bash(del \"nul\")",
+      "Bash(git add:*)",
+      "Bash(find:*)",
+      "Bash(git pull:*)",
+      "Bash(test:*)",
+      "Bash(set MCP_MEMORY_STORAGE_BACKEND=cloudflare)",
+      "Bash(set CLOUDFLARE_API_TOKEN=mkdXbb-iplcHNBRQ5tfqV3Sh_7eALYBpO4e3Di1m)",
+      "Bash(set CLOUDFLARE_ACCOUNT_ID=be0e35a26715043ef8df90253268c33f)",
+      "Bash(set CLOUDFLARE_D1_DATABASE_ID=f745e9b4-ba8e-4d47-b38f-12af91060d5a)",
+      "Bash(set CLOUDFLARE_VECTORIZE_INDEX=mcp-memory-index)",
+      "Bash(uv run:*)",
+      "mcp__memory__check_database_health",
+      "Bash(claude mcp:*)"
+    ],
+    "deny": [],
+    "ask": [],
+    "additionalDirectories": [
+      "C:\\Users\\heinrich.krupp",
+      "C:\\c\\REPOSITORIES"
+    ]
+  }
+}
