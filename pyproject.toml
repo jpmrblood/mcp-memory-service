@@ -61,6 +61,10 @@ ml = [
     "sentence-transformers>=2.2.2",
     "torch>=2.0.0"
 ]
+cpu = [
+    "sentence-transformers>=2.2.2",
+    "torch>=2.0.0"
+]
 sqlite = [
     "sqlite-vec>=0.1.0"
 ]
