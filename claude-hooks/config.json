@@ -1,8 +1,31 @@
 {
   "memoryService": {
-    "endpoint": "cloudflare",
-    "apiKey": "VhOGAoUOE5_BMzu-phDORdyXHNMcDRBxvndK_Uop",
-    "defaultTags": ["claude-code", "auto-generated"],
+    "protocol": "auto",
+    "preferredProtocol": "mcp",
+    "fallbackEnabled": true,
+    "http": {
+      "endpoint": "https://localhost:8443",
+      "apiKey": "test-key-123",
+      "healthCheckTimeout": 3000,
+      "useDetailedHealthCheck": true
+    },
+    "mcp": {
+      "serverCommand": [
+        "uv",
+        "run",
+        "memory",
+        "server",
+        "-s",
+        "cloudflare"
+      ],
+      "serverWorkingDir": "{{REPO_ROOT_PLACEHOLDER}}",
+      "connectionTimeout": 5000,
+      "toolCallTimeout": 10000
+    },
+    "defaultTags": [
+      "claude-code",
+      "auto-generated"
+    ],
     "maxMemoriesPerSession": 8,
     "enableSessionConsolidation": true,
     "injectAfterCompacting": false,
@@ -11,14 +34,17 @@
     "recentTimeWindow": "last-week",
     "fallbackTimeWindow": "last-month",
     "showStorageSource": true,
-    "sourceDisplayMode": "brief",
-    "healthCheckTimeout": 3000,
-    "healthCheckEnabled": false,
-    "useDetailedHealthCheck": false
+    "sourceDisplayMode": "brief"
   },
   "projectDetection": {
     "gitRepository": true,
-    "packageFiles": ["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml"],
+    "packageFiles": [
+      "package.json",
+      "pyproject.toml",
+      "Cargo.toml",
+      "go.mod",
+      "pom.xml"
+    ],
     "frameworkDetection": true,
     "languageDetection": true,
     "confidenceThreshold": 0.3
@@ -60,6 +86,10 @@
       "timeout": 10000,
       "priority": "high"
     },
+    "midConversation": {
+      "timeout": 8000,
+      "priority": "high"
+    },
     "sessionEnd": {
       "enabled": true,
       "timeout": 15000,
@@ -88,6 +118,65 @@
     "showPhaseDetails": true,
     "showGitAnalysis": true,
     "cleanMode": false
+  },
+  "naturalTriggers": {
+    "enabled": true,
+    "triggerThreshold": 0.6,
+    "cooldownPeriod": 30000,
+    "maxMemoriesPerTrigger": 5
+  },
+  "performance": {
+    "defaultProfile": "balanced",
+    "enableMonitoring": true,
+    "autoAdjust": true,
+    "profiles": {
+      "speed_focused": {
+        "maxLatency": 100,
+        "enabledTiers": [
+          "instant"
+        ],
+        "backgroundProcessing": false,
+        "degradeThreshold": 200,
+        "description": "Fastest response, minimal memory awareness"
+      },
+      "balanced": {
+        "maxLatency": 200,
+        "enabledTiers": [
+          "instant",
+          "fast"
+        ],
+        "backgroundProcessing": true,
+        "degradeThreshold": 400,
+        "description": "Moderate latency, smart memory triggers"
+      },
+      "memory_aware": {
+        "maxLatency": 500,
+        "enabledTiers": [
+          "instant",
+          "fast",
+          "intensive"
+        ],
+        "backgroundProcessing": true,
+        "degradeThreshold": 1000,
+        "description": "Full memory awareness, accept higher latency"
+      },
+      "adaptive": {
+        "autoAdjust": true,
+        "degradeThreshold": 800,
+        "backgroundProcessing": true,
+        "description": "Auto-adjust based on performance and user preferences"
+      }
+    }
+  },
+  "conversationMonitor": {
+    "contextWindow": 10,
+    "enableCaching": true,
+    "maxCacheSize": 100
+  },
+  "patternDetector": {
+    "sensitivity": 0.7,
+    "adaptiveLearning": true,
+    "learningRate": 0.05
   },
   "logging": {
     "level": "debug",

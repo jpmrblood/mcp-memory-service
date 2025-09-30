@@ -35,37 +35,39 @@ from mcp.types import TextContent
 
 # Import existing memory service components
 from .config import (
-    CHROMA_PATH, COLLECTION_METADATA, STORAGE_BACKEND, 
+    CHROMA_PATH, COLLECTION_METADATA, STORAGE_BACKEND,
     CONSOLIDATION_ENABLED, EMBEDDING_MODEL_NAME, INCLUDE_HOSTNAME,
+    SQLITE_VEC_PATH,
     CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_VECTORIZE_INDEX,
     CLOUDFLARE_D1_DATABASE_ID, CLOUDFLARE_R2_BUCKET, CLOUDFLARE_EMBEDDING_MODEL,
-    CLOUDFLARE_LARGE_CONTENT_THRESHOLD, CLOUDFLARE_MAX_RETRIES, CLOUDFLARE_BASE_DELAY
+    CLOUDFLARE_LARGE_CONTENT_THRESHOLD, CLOUDFLARE_MAX_RETRIES, CLOUDFLARE_BASE_DELAY,
+    HYBRID_SYNC_INTERVAL, HYBRID_BATCH_SIZE, HYBRID_MAX_QUEUE_SIZE,
+    HYBRID_SYNC_ON_STARTUP, HYBRID_FALLBACK_TO_PRIMARY
 )
 from .storage.base import MemoryStorage
+
+def _get_sqlite_vec_storage(error_message="Failed to import SQLite-vec storage"):
+    """Helper function to import SqliteVecMemoryStorage with consistent error handling."""
+    try:
+        from .storage.sqlite_vec import SqliteVecMemoryStorage
+        return SqliteVecMemoryStorage
+    except ImportError as e:
+        logger.error(f"{error_message}: {e}")
+        raise
 
 def get_storage_backend():
     """Dynamically select and import storage backend based on configuration and availability."""
     backend = STORAGE_BACKEND.lower()
-    
+
     if backend == "sqlite-vec" or backend == "sqlite_vec":
-        try:
-            from .storage.sqlite_vec import SqliteVecStorage
-            return SqliteVecStorage
-        except ImportError as e:
-            logger.error(f"Failed to import SQLite-vec storage: {e}")
-            raise
+        return _get_sqlite_vec_storage()
     elif backend == "chroma":
         try:
             from .storage.chroma import ChromaStorage
             return ChromaStorage
         except ImportError:
             logger.warning("ChromaDB not available, falling back to SQLite-vec")
-            try:
-                from .storage.sqlite_vec import SqliteVecStorage
-                return SqliteVecStorage
-            except ImportError as e:
-                logger.error(f"Failed to import fallback SQLite-vec storage: {e}")
-                raise
+            return _get_sqlite_vec_storage("Failed to import fallback SQLite-vec storage")
     elif backend == "cloudflare":
         try:
             from .storage.cloudflare import CloudflareStorage
@@ -73,14 +75,17 @@ def get_storage_backend():
         except ImportError as e:
             logger.error(f"Failed to import Cloudflare storage: {e}")
             raise
+    elif backend == "hybrid":
+        try:
+            from .storage.hybrid import HybridMemoryStorage
+            return HybridMemoryStorage
+        except ImportError as e:
+            logger.error(f"Failed to import Hybrid storage: {e}")
+            logger.warning("Falling back to SQLite-vec storage")
+            return _get_sqlite_vec_storage("Failed to import fallback SQLite-vec storage")
     else:
         logger.warning(f"Unknown storage backend '{backend}', defaulting to SQLite-vec")
-        try:
-            from .storage.sqlite_vec import SqliteVecStorage
-            return SqliteVecStorage
-        except ImportError as e:
-            logger.error(f"Failed to import default SQLite-vec storage: {e}")
-            raise
+        return _get_sqlite_vec_storage("Failed to import default SQLite-vec storage")
 from .models.memory import Memory
 
 # Configure logging
@@ -100,10 +105,10 @@ async def mcp_server_lifespan(server: FastMCP) -> AsyncIterator[MCPServerContext
     # Initialize storage backend based on configuration and availability
     StorageClass = get_storage_backend()
     
-    if StorageClass.__name__ == "SqliteVecStorage":
+    if StorageClass.__name__ == "SqliteVecMemoryStorage":
         storage = StorageClass(
-            db_path=CHROMA_PATH / "memory.db",
-            embedding_manager=None  # Will be set after creation
+            db_path=SQLITE_VEC_PATH,
+            embedding_model=EMBEDDING_MODEL_NAME
         )
     elif StorageClass.__name__ == "CloudflareStorage":
         storage = StorageClass(
@@ -116,6 +121,29 @@ async def mcp_server_lifespan(server: FastMCP) -> AsyncIterator[MCPServerContext
             large_content_threshold=CLOUDFLARE_LARGE_CONTENT_THRESHOLD,
             max_retries=CLOUDFLARE_MAX_RETRIES,
             base_delay=CLOUDFLARE_BASE_DELAY
+        )
+    elif StorageClass.__name__ == "HybridMemoryStorage":
+        # Prepare Cloudflare configuration dict
+        cloudflare_config = None
+        if all([CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_VECTORIZE_INDEX, CLOUDFLARE_D1_DATABASE_ID]):
+            cloudflare_config = {
+                'api_token': CLOUDFLARE_API_TOKEN,
+                'account_id': CLOUDFLARE_ACCOUNT_ID,
+                'vectorize_index': CLOUDFLARE_VECTORIZE_INDEX,
+                'd1_database_id': CLOUDFLARE_D1_DATABASE_ID,
+                'r2_bucket': CLOUDFLARE_R2_BUCKET,
+                'embedding_model': CLOUDFLARE_EMBEDDING_MODEL,
+                'large_content_threshold': CLOUDFLARE_LARGE_CONTENT_THRESHOLD,
+                'max_retries': CLOUDFLARE_MAX_RETRIES,
+                'base_delay': CLOUDFLARE_BASE_DELAY
+            }
+
+        storage = StorageClass(
+            sqlite_db_path=SQLITE_VEC_PATH,
+            embedding_model=EMBEDDING_MODEL_NAME,
+            cloudflare_config=cloudflare_config,
+            sync_interval=HYBRID_SYNC_INTERVAL,
+            batch_size=HYBRID_BATCH_SIZE
         )
     else:  # ChromaStorage
         storage = StorageClass(
@@ -390,6 +418,72 @@ async def check_database_health(ctx: Context) -> Dict[str, Any]:
             "backend": "unknown",
             "error": f"Health check failed: {str(e)}"
         }
+
+@mcp.tool()
+async def list_memories(
+    ctx: Context,
+    page: int = 1,
+    page_size: int = 10,
+    tag: Optional[str] = None,
+    memory_type: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    List memories with pagination and optional filtering.
+    
+    Args:
+        page: Page number (1-based)
+        page_size: Number of memories per page
+        tag: Filter by specific tag
+        memory_type: Filter by memory type
+    
+    Returns:
+        Dictionary with memories and pagination info
+    """
+    try:
+        storage = ctx.request_context.lifespan_context.storage
+        
+        # Calculate offset
+        offset = (page - 1) * page_size
+
+        # Use database-level filtering for better performance
+        tags_list = [tag] if tag else None
+        memories = await storage.get_all_memories(
+            limit=page_size,
+            offset=offset,
+            memory_type=memory_type,
+            tags=tags_list
+        )
+        
+        # Format results
+        results = []
+        for memory in memories:
+            results.append({
+                "content": memory.content,
+                "content_hash": memory.content_hash,
+                "tags": memory.tags,
+                "memory_type": memory.memory_type,
+                "metadata": memory.metadata,
+                "created_at": memory.created_at_iso,
+                "updated_at": memory.updated_at_iso
+            })
+        
+        return {
+            "memories": results,
+            "page": page,
+            "page_size": page_size,
+            "total_found": len(results)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error listing memories: {e}")
+        return {
+            "memories": [],
+            "page": page,
+            "page_size": page_size,
+            "error": f"Failed to list memories: {str(e)}"
+        }
+
+
 
 # =============================================================================
 # MAIN ENTRY POINT

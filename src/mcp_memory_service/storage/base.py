@@ -44,6 +44,30 @@ class MemoryStorage(ABC):
     async def search_by_tag(self, tags: List[str]) -> List[Memory]:
         """Search memories by tags."""
         pass
+
+    async def search_by_tag_chronological(self, tags: List[str], limit: int = None, offset: int = 0) -> List[Memory]:
+        """
+        Search memories by tags with chronological ordering (newest first).
+
+        Args:
+            tags: List of tags to search for
+            limit: Maximum number of memories to return (None for all)
+            offset: Number of memories to skip (for pagination)
+
+        Returns:
+            List of Memory objects ordered by created_at DESC
+        """
+        # Default implementation: use search_by_tag then sort
+        memories = await self.search_by_tag(tags)
+        memories.sort(key=lambda m: m.created_at or 0, reverse=True)
+
+        # Apply pagination
+        if offset > 0:
+            memories = memories[offset:]
+        if limit is not None:
+            memories = memories[:limit]
+
+        return memories
     
     @abstractmethod
     async def delete(self, content_hash: str) -> Tuple[bool, str]:
@@ -107,10 +131,47 @@ class MemoryStorage(ABC):
         """Search memories. Default implementation uses retrieve."""
         return await self.retrieve(query, n_results)
     
-    async def get_all_memories(self) -> List[Memory]:
-        """Get all memories in storage. Override for specific implementations."""
+    async def get_all_memories(self, limit: int = None, offset: int = 0, memory_type: Optional[str] = None, tags: Optional[List[str]] = None) -> List[Memory]:
+        """
+        Get all memories in storage ordered by creation time (newest first).
+
+        Args:
+            limit: Maximum number of memories to return (None for all)
+            offset: Number of memories to skip (for pagination)
+            memory_type: Optional filter by memory type
+            tags: Optional filter by tags (matches ANY of the provided tags)
+
+        Returns:
+            List of Memory objects ordered by created_at DESC, optionally filtered by type and tags
+        """
         return []
     
+    async def count_all_memories(self, memory_type: Optional[str] = None) -> int:
+        """
+        Get total count of memories in storage.
+
+        Args:
+            memory_type: Optional filter by memory type
+
+        Returns:
+            Total number of memories, optionally filtered by type
+        """
+        return 0
+
+    async def count_memories_by_tag(self, tags: List[str]) -> int:
+        """
+        Count memories that match any of the given tags.
+
+        Args:
+            tags: List of tags to search for
+
+        Returns:
+            Number of memories matching any tag
+        """
+        # Default implementation: search then count
+        memories = await self.search_by_tag(tags)
+        return len(memories)
+
     async def get_memories_by_time_range(self, start_time: float, end_time: float) -> List[Memory]:
         """Get memories within a time range. Override for specific implementations."""
         return []

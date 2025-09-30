@@ -5,7 +5,6 @@
 
 const fs = require('fs').promises;
 const path = require('path');
-const https = require('https');
 
 // Import utilities
 const { detectProjectContext } = require('../utilities/project-detector');
@@ -13,6 +12,7 @@ const { scoreMemoryRelevance } = require('../utilities/memory-scorer');
 const { formatMemoriesForContext } = require('../utilities/context-formatter');
 const { detectContextShift, extractCurrentContext, determineRefreshStrategy } = require('../utilities/context-shift-detector');
 const { analyzeGitContext, buildGitContextQuery } = require('../utilities/git-analyzer');
+const { MemoryClient } = require('../utilities/memory-client');
 
 /**
  * Load hook configuration
@@ -26,8 +26,21 @@ async function loadConfig() {
         console.warn('[Memory Hook] Using default configuration:', error.message);
         return {
             memoryService: {
-                endpoint: 'https://narrowbox.local:8443',
-                apiKey: 'test-key-123',
+                protocol: 'auto',
+                preferredProtocol: 'mcp',
+                fallbackEnabled: true,
+                http: {
+                    endpoint: 'https://localhost:8443',
+                    apiKey: 'test-key-123',
+                    healthCheckTimeout: 3000,
+                    useDetailedHealthCheck: false
+                },
+                mcp: {
+                    serverCommand: ['uv', 'run', 'memory', 'server'],
+                    serverWorkingDir: null,
+                    connectionTimeout: 5000,
+                    toolCallTimeout: 10000
+                },
                 defaultTags: ['claude-code', 'auto-generated'],
                 maxMemoriesPerSession: 8,
                 injectAfterCompacting: false
@@ -50,73 +63,45 @@ async function loadConfig() {
 }
 
 /**
- * Query health endpoint for comprehensive storage information
+ * Query memory service for health information (supports both HTTP and MCP)
  */
-async function queryHealthEndpoint(endpoint, apiKey, options = {}) {
-    const { timeout = 3000, useDetailed = true } = options;
-    
-    return new Promise((resolve) => {
-        try {
-            const healthPath = useDetailed ? '/api/health/detailed' : '/api/health';
-            const url = new URL(healthPath, endpoint);
-            
-            const requestOptions = {
-                hostname: url.hostname,
-                port: url.port || 8443,
-                path: url.pathname,
-                method: 'GET',
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Accept': 'application/json'
-                },
-                timeout: timeout,
-                rejectUnauthorized: false // For self-signed certificates
-            };
-            
-            const req = https.request(requestOptions, (res) => {
-                let data = '';
-                res.on('data', (chunk) => {
-                    data += chunk;
-                });
-                res.on('end', () => {
-                    try {
-                        if (res.statusCode === 200) {
-                            const healthData = JSON.parse(data);
-                            resolve({ success: true, data: healthData });
-                        } else {
-                            resolve({ success: false, error: `HTTP ${res.statusCode}`, fallback: true });
-                        }
-                    } catch (parseError) {
-                        resolve({ success: false, error: 'Invalid JSON response', fallback: true });
-                    }
-                });
-            });
-            
-            req.on('error', (error) => {
-                resolve({ success: false, error: error.message, fallback: true });
-            });
-            
-            req.on('timeout', () => {
-                req.destroy();
-                resolve({ success: false, error: 'Health check timeout', fallback: true });
-            });
-            
-            req.end();
-            
-        } catch (error) {
-            resolve({ success: false, error: error.message, fallback: true });
-        }
-    });
+async function queryMemoryHealth(memoryClient) {
+    try {
+        const healthResult = await memoryClient.getHealthStatus();
+        return healthResult;
+    } catch (error) {
+        return {
+            success: false,
+            error: error.message,
+            fallback: true
+        };
+    }
 }
 
 /**
- * Parse health data into storage info structure
+ * Parse health data into storage info structure (supports both HTTP and MCP responses)
  */
 function parseHealthDataToStorageInfo(healthData) {
     try {
-        const storage = healthData.storage || {};
+        // Handle MCP tool response format
+        if (healthData.content && Array.isArray(healthData.content)) {
+            const textContent = healthData.content.find(c => c.type === 'text')?.text;
+            if (textContent) {
+                try {
+                    // Parse JSON from MCP response
+                    const parsedData = JSON.parse(textContent.replace(/'/g, '"').replace(/True/g, 'true').replace(/False/g, 'false').replace(/None/g, 'null'));
+                    return parseHealthDataToStorageInfo(parsedData);
+                } catch (parseError) {
+                    console.warn('[Memory Hook] Could not parse MCP health response:', parseError.message);
+                    return getUnknownStorageInfo();
+                }
+            }
+        }
+
+        // Handle direct health data object
+        const storage = healthData.storage || healthData || {};
         const system = healthData.system || {};
-        const statistics = healthData.statistics || {};
+        const statistics = healthData.statistics || healthData.stats || {};
         
         // Determine icon based on backend
         let icon = '💾';
@@ -180,15 +165,22 @@ function parseHealthDataToStorageInfo(healthData) {
         };
         
     } catch (error) {
-        return {
-            backend: 'unknown',
-            type: 'unknown',
-            location: 'Health parse error',
-            description: 'Unknown Storage',
-            icon: '❓',
-            health: { status: 'error', totalMemories: 0 }
-        };
+        return getUnknownStorageInfo();
     }
+}
+
+/**
+ * Get unknown storage info structure
+ */
+function getUnknownStorageInfo() {
+    return {
+        backend: 'unknown',
+        type: 'unknown',
+        location: 'Health parse error',
+        description: 'Unknown Storage',
+        icon: '❓',
+        health: { status: 'error', totalMemories: 0 }
+    };
 }
 
 /**
@@ -307,82 +299,26 @@ function detectStorageBackendFallback(config) {
 }
 
 /**
- * Query memory service for relevant memories
+ * Query memory service for relevant memories (supports both HTTP and MCP)
  */
-async function queryMemoryService(endpoint, apiKey, query) {
-    return new Promise((resolve, reject) => {
-        const url = new URL('/mcp', endpoint);
-        const postData = JSON.stringify({
-            jsonrpc: '2.0',
-            id: 1,
-            method: 'tools/call',
-            params: {
-                name: 'retrieve_memory',
-                arguments: {
-                    query: query.semanticQuery || '',
-                    n_results: query.limit || 10
-                }
-            }
-        });
+async function queryMemoryService(memoryClient, query) {
+    try {
+        let memories = [];
 
-        const options = {
-            hostname: url.hostname,
-            port: url.port || 8443,
-            path: url.pathname,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(postData),
-                'Authorization': `Bearer ${apiKey}`
-            },
-            rejectUnauthorized: false // For self-signed certificates
-        };
+        // Use time-based queries for recent memories
+        if (query.timeFilter) {
+            const timeQuery = `${query.semanticQuery} ${query.timeFilter}`;
+            memories = await memoryClient.queryMemoriesByTime(timeQuery, query.limit);
+        } else {
+            // Use semantic search for general queries
+            memories = await memoryClient.queryMemories(query.semanticQuery, query.limit);
+        }
 
-        const req = https.request(options, (res) => {
-            let data = '';
-            res.on('data', (chunk) => {
-                data += chunk;
-            });
-            res.on('end', () => {
-                try {
-                    const response = JSON.parse(data);
-                    if (response.result && response.result.content) {
-                        // The response.result.content[0].text contains a Python dict format string
-                        let textData = response.result.content[0].text;
-                        
-                        try {
-                            // Convert Python dict format to JSON format safely
-                            textData = textData
-                                .replace(/'/g, '"')  // Replace single quotes with double quotes
-                                .replace(/True/g, 'true')  // Convert Python True to JSON true
-                                .replace(/False/g, 'false')  // Convert Python False to JSON false
-                                .replace(/None/g, 'null');  // Convert Python None to JSON null
-                            
-                            const memories = JSON.parse(textData);
-                            resolve(memories.results || memories.memories || []);
-                        } catch (conversionError) {
-                            console.warn('[Memory Hook] Could not parse memory response:', conversionError.message);
-                            console.warn('[Memory Hook] Raw text preview:', textData.substring(0, 200) + '...');
-                            resolve([]);
-                        }
-                    } else {
-                        resolve([]);
-                    }
-                } catch (parseError) {
-                    console.warn('[Memory Hook] Parse error:', parseError.message);
-                    resolve([]);
-                }
-            });
-        });
-
-        req.on('error', (error) => {
-            console.warn('[Memory Hook] Network error:', error.message);
-            resolve([]);
-        });
-
-        req.write(postData);
-        req.end();
-    });
+        return memories || [];
+    } catch (error) {
+        console.warn('[Memory Hook] Memory query error:', error.message);
+        return [];
+    }
 }
 
 // ANSI Colors for console output
@@ -446,75 +382,89 @@ async function onSessionStart(context) {
             console.log(`${CONSOLE_COLORS.BLUE}📂 Project${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.BRIGHT}${projectContext.name}${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}(${projectContext.language})${CONSOLE_COLORS.RESET}`);
         }
         
-        // Detect storage backend and show source info
+        // Initialize memory client and detect storage backend
         const showStorageSource = config.memoryService?.showStorageSource !== false; // Default to true
         const sourceDisplayMode = config.memoryService?.sourceDisplayMode || 'brief';
-        const healthCheckEnabled = config.memoryService?.healthCheckEnabled !== false; // Default to true
-        const healthCheckTimeout = config.memoryService?.healthCheckTimeout || 3000;
-        const useDetailedHealthCheck = config.memoryService?.useDetailedHealthCheck !== false; // Default to true
+        let memoryClient = null;
         let storageInfo = null;
-        
+        let connectionInfo = null;
+
         if (showStorageSource && verbose && !cleanMode) {
-            // Try health check first for accurate information (if enabled)
-            if (healthCheckEnabled) {
-                const healthResult = await queryHealthEndpoint(
-                    config.memoryService.endpoint,
-                    config.memoryService.apiKey,
-                    { timeout: healthCheckTimeout, useDetailed: useDetailedHealthCheck }
-                );
-                
-                if (healthResult.success) {
-                    storageInfo = parseHealthDataToStorageInfo(healthResult.data);
-                
-                // Display based on mode with rich health information
-                if (sourceDisplayMode === 'detailed') {
-                    console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET}`);
-                    console.log(`${CONSOLE_COLORS.CYAN}📍 Location${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}${storageInfo.location}${CONSOLE_COLORS.RESET}`);
-                    if (storageInfo.health.totalMemories > 0) {
-                        console.log(`${CONSOLE_COLORS.CYAN}📊 Database${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GREEN}${storageInfo.health.totalMemories} memories${CONSOLE_COLORS.RESET}, ${CONSOLE_COLORS.YELLOW}${storageInfo.health.databaseSizeMB}MB${CONSOLE_COLORS.RESET}, ${CONSOLE_COLORS.BLUE}${storageInfo.health.uniqueTags} tags${CONSOLE_COLORS.RESET}`);
-                    }
-                } else if (sourceDisplayMode === 'brief') {
-                    const memoryCount = storageInfo.health.totalMemories > 0 ? ` • ${storageInfo.health.totalMemories} memories` : '';
-                    const sizeInfo = storageInfo.health.databaseSizeMB > 0 ? ` • ${storageInfo.health.databaseSizeMB}MB` : '';
-                    console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET}${memoryCount}${sizeInfo}`);
-                    if (storageInfo.location && sourceDisplayMode === 'brief') {
-                        console.log(`${CONSOLE_COLORS.CYAN}📍 Path${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}${storageInfo.location}${CONSOLE_COLORS.RESET}`);
-                    }
-                } else if (sourceDisplayMode === 'icon-only') {
-                    console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${storageInfo.backend} • ${storageInfo.health.totalMemories} memories`);
+            // Initialize unified memory client for health check and memory queries
+            try {
+                memoryClient = new MemoryClient(config.memoryService);
+                const connection = await memoryClient.connect();
+                connectionInfo = memoryClient.getConnectionInfo();
+
+                if (verbose && showMemoryDetails && !cleanMode && connectionInfo?.activeProtocol) {
+                    console.log(`${CONSOLE_COLORS.CYAN}🔗 Connection${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} Using ${CONSOLE_COLORS.BRIGHT}${connectionInfo.activeProtocol.toUpperCase()}${CONSOLE_COLORS.RESET} protocol`);
                 }
-                } else {
-                    // Fallback to environment/config detection when health check fails
-                    if (verbose && showMemoryDetails && !cleanMode) {
-                        console.log(`${CONSOLE_COLORS.YELLOW}⚠️  Health Check${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}${healthResult.error}, using config fallback${CONSOLE_COLORS.RESET}`);
+
+                const healthResult = await queryMemoryHealth(memoryClient);
+                
+                    if (healthResult.success) {
+                        storageInfo = parseHealthDataToStorageInfo(healthResult.data);
+
+                        // Display based on mode with rich health information
+                        if (sourceDisplayMode === 'detailed') {
+                            console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET}`);
+                            console.log(`${CONSOLE_COLORS.CYAN}📍 Location${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}${storageInfo.location}${CONSOLE_COLORS.RESET}`);
+                            if (storageInfo.health.totalMemories > 0) {
+                                console.log(`${CONSOLE_COLORS.CYAN}📊 Database${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GREEN}${storageInfo.health.totalMemories} memories${CONSOLE_COLORS.RESET}, ${CONSOLE_COLORS.YELLOW}${storageInfo.health.databaseSizeMB}MB${CONSOLE_COLORS.RESET}, ${CONSOLE_COLORS.BLUE}${storageInfo.health.uniqueTags} tags${CONSOLE_COLORS.RESET}`);
+                            }
+                        } else if (sourceDisplayMode === 'brief') {
+                            const memoryCount = storageInfo.health.totalMemories > 0 ? ` • ${storageInfo.health.totalMemories} memories` : '';
+                            const sizeInfo = storageInfo.health.databaseSizeMB > 0 ? ` • ${storageInfo.health.databaseSizeMB}MB` : '';
+                            console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET}${memoryCount}${sizeInfo}`);
+                            if (storageInfo.location && sourceDisplayMode === 'brief') {
+                                console.log(`${CONSOLE_COLORS.CYAN}📍 Path${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}${storageInfo.location}${CONSOLE_COLORS.RESET}`);
+                            }
+                        } else if (sourceDisplayMode === 'icon-only') {
+                            console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${storageInfo.backend} • ${storageInfo.health.totalMemories} memories`);
+                        }
+                    } else {
+                        // Fallback to environment/config detection when MCP health check fails
+                        if (verbose && showMemoryDetails && !cleanMode) {
+                            console.log(`${CONSOLE_COLORS.YELLOW}⚠️  MCP Health Check${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}${healthResult.error}, using config fallback${CONSOLE_COLORS.RESET}`);
+                        }
+
+                        storageInfo = detectStorageBackendFallback(config);
+
+                        if (sourceDisplayMode === 'detailed') {
+                            console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET}`);
+                            console.log(`${CONSOLE_COLORS.CYAN}📍 Location${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}${storageInfo.location}${CONSOLE_COLORS.RESET}`);
+                        } else if (sourceDisplayMode === 'brief') {
+                            console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}(${storageInfo.location})${CONSOLE_COLORS.RESET}`);
+                        } else if (sourceDisplayMode === 'icon-only') {
+                            console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${storageInfo.backend}`);
+                        }
                     }
-                    
-                    storageInfo = detectStorageBackendFallback(config);
-                    
-                    if (sourceDisplayMode === 'detailed') {
-                        console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET}`);
-                        console.log(`${CONSOLE_COLORS.CYAN}📍 Location${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}${storageInfo.location}${CONSOLE_COLORS.RESET}`);
-                    } else if (sourceDisplayMode === 'brief') {
-                        console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}(${storageInfo.location})${CONSOLE_COLORS.RESET}`);
-                    } else if (sourceDisplayMode === 'icon-only') {
-                        console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${storageInfo.backend}`);
-                    }
+            } catch (error) {
+                // Memory client connection failed, fall back to environment detection
+                if (verbose && showMemoryDetails && !cleanMode) {
+                    console.log(`${CONSOLE_COLORS.YELLOW}⚠️  Memory Connection${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}${error.message}, using environment fallback${CONSOLE_COLORS.RESET}`);
                 }
-            } else {
-                // Health check disabled, use config fallback
+
                 storageInfo = detectStorageBackendFallback(config);
-                
-                if (sourceDisplayMode === 'detailed') {
-                    console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET}`);
-                    console.log(`${CONSOLE_COLORS.CYAN}📍 Location${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}${storageInfo.location}${CONSOLE_COLORS.RESET}`);
-                } else if (sourceDisplayMode === 'brief') {
+
+                if (sourceDisplayMode === 'brief') {
                     console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}(${storageInfo.location})${CONSOLE_COLORS.RESET}`);
-                } else if (sourceDisplayMode === 'icon-only') {
-                    console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${storageInfo.backend}`);
                 }
             }
+        } else {
+            // Health check disabled, use config fallback
+            storageInfo = detectStorageBackendFallback(config);
+
+            if (sourceDisplayMode === 'detailed') {
+                console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET}`);
+                console.log(`${CONSOLE_COLORS.CYAN}📍 Location${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}${storageInfo.location}${CONSOLE_COLORS.RESET}`);
+            } else if (sourceDisplayMode === 'brief') {
+                console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${CONSOLE_COLORS.BRIGHT}${storageInfo.description}${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}(${storageInfo.location})${CONSOLE_COLORS.RESET}`);
+            } else if (sourceDisplayMode === 'icon-only') {
+                console.log(`${CONSOLE_COLORS.CYAN}💾 Storage${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${storageInfo.icon} ${storageInfo.backend}`);
+            }
         }
-        
+
         // Analyze git context if enabled
         const gitAnalysisEnabled = config.gitAnalysis?.enabled !== false; // Default to true
         const showGitAnalysis = config.output?.showGitAnalysis !== false; // Default to true
@@ -545,6 +495,20 @@ async function onSessionStart(context) {
             }
         }
         
+        // Initialize memory client for memory queries if not already connected
+        if (!memoryClient) {
+            try {
+                memoryClient = new MemoryClient(config.memoryService);
+                await memoryClient.connect();
+                connectionInfo = memoryClient.getConnectionInfo();
+            } catch (error) {
+                if (verbose && !cleanMode) {
+                    console.log(`${CONSOLE_COLORS.YELLOW}⚠️  Memory Connection${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}Failed to connect for memory queries: ${error.message}${CONSOLE_COLORS.RESET}`);
+                }
+                memoryClient = null;
+            }
+        }
+
         // Multi-phase memory retrieval for better recency prioritization
         const allMemories = [];
         const maxMemories = config.memoryService.maxMemoriesPerSession;
@@ -568,15 +532,11 @@ async function onSessionStart(context) {
                 for (const gitQuery of gitQueries.slice(0, 2)) { // Limit to top 2 queries for performance
                     if (allMemories.length >= maxGitMemories) break;
                     
-                    const gitMemories = await queryMemoryService(
-                        config.memoryService.endpoint,
-                        config.memoryService.apiKey,
-                        {
-                            semanticQuery: gitQuery.semanticQuery,
-                            limit: Math.min(maxGitMemories - allMemories.length, 3),
-                            timeFilter: 'last-2-weeks' // Focus on recent memories for git context
-                        }
-                    );
+                    const gitMemories = await queryMemoryService(memoryClient, {
+                        semanticQuery: gitQuery.semanticQuery,
+                        limit: Math.min(maxGitMemories - allMemories.length, 3),
+                        timeFilter: 'last-2-weeks' // Focus on recent memories for git context
+                    });
                     
                     if (gitMemories && gitMemories.length > 0) {
                         // Mark these memories as git-context derived for scoring
@@ -635,11 +595,7 @@ async function onSessionStart(context) {
                     console.log(`${CONSOLE_COLORS.BLUE}🕒 Phase 1${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} Searching recent memories (${recentTimeWindow}, ${recentQuery.limit} slots)`);
                 }
                 
-                const recentMemories = await queryMemoryService(
-                    config.memoryService.endpoint,
-                    config.memoryService.apiKey,
-                    recentQuery
-                );
+                const recentMemories = await queryMemoryService(memoryClient, recentQuery);
                 
                 // Filter out duplicates from git context phase
                 if (recentMemories && recentMemories.length > 0) {
@@ -682,11 +638,7 @@ async function onSessionStart(context) {
                     console.log(`${CONSOLE_COLORS.BLUE}🎯 Phase 2${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} Searching important tagged memories (${remainingSlots} slots)`);
                 }
                 
-                const importantMemories = await queryMemoryService(
-                    config.memoryService.endpoint,
-                    config.memoryService.apiKey,
-                    importantQuery
-                );
+                const importantMemories = await queryMemoryService(memoryClient, importantQuery);
                 
                 // Avoid duplicates by checking content similarity  
                 const newMemories = (importantMemories || []).filter(newMem => 
@@ -712,11 +664,7 @@ async function onSessionStart(context) {
                     console.log(`${CONSOLE_COLORS.BLUE}🔄 Phase 3${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} Fallback general context (${stillRemaining} slots, ${fallbackTimeWindow})`);
                 }
                 
-                const fallbackMemories = await queryMemoryService(
-                    config.memoryService.endpoint,
-                    config.memoryService.apiKey,
-                    fallbackQuery
-                );
+                const fallbackMemories = await queryMemoryService(memoryClient, fallbackQuery);
                 
                 const newFallbackMemories = (fallbackMemories || []).filter(newMem => 
                     !allMemories.some(existing => 
@@ -745,15 +693,22 @@ async function onSessionStart(context) {
                 timeFilter: 'last-2-weeks'
             };
             
-            const legacyMemories = await queryMemoryService(
-                config.memoryService.endpoint,
-                config.memoryService.apiKey,
-                memoryQuery
-            );
+            const legacyMemories = await queryMemoryService(memoryClient, memoryQuery);
             
             allMemories.push(...(legacyMemories || []));
         }
         
+        // Skip memory retrieval if no memory client available
+        if (!memoryClient) {
+            if (verbose && !cleanMode) {
+                console.log(`${CONSOLE_COLORS.YELLOW}⚠️  Memory Retrieval${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}Skipped due to connection failure${CONSOLE_COLORS.RESET}`);
+            }
+            // Skip memory operations but don't return - still complete the hook
+            if (verbose && showMemoryDetails && !cleanMode) {
+                console.log(`${CONSOLE_COLORS.YELLOW}📭 Memory Search${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}No memory service available${CONSOLE_COLORS.RESET}`);
+            }
+        }
+
         // Use the collected memories from all phases
         const memories = allMemories.slice(0, maxMemories);
         
@@ -850,10 +805,28 @@ async function onSessionStart(context) {
         } else if (verbose && showMemoryDetails && !cleanMode) {
             console.log(`${CONSOLE_COLORS.YELLOW}📭 Memory Search${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.GRAY}No relevant memories found${CONSOLE_COLORS.RESET}`);
         }
+
+        // Cleanup MCP client after memory operations
+        if (memoryClient) {
+            try {
+                await memoryClient.disconnect();
+            } catch (error) {
+                // Ignore cleanup errors
+            }
+        }
         
     } catch (error) {
         console.error(`${CONSOLE_COLORS.RED}❌ Memory Hook Error${CONSOLE_COLORS.RESET} ${CONSOLE_COLORS.DIM}→${CONSOLE_COLORS.RESET} ${error.message}`);
         // Fail gracefully - don't prevent session from starting
+    } finally {
+        // Ensure MCP client cleanup even on error
+        if (memoryClient) {
+            try {
+                await memoryClient.disconnect();
+            } catch (error) {
+                // Ignore cleanup errors
+            }
+        }
     }
 }
 

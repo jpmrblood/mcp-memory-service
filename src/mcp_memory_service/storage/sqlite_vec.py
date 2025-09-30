@@ -94,7 +94,24 @@ class SqliteVecMemoryStorage(MemoryStorage):
         os.makedirs(os.path.dirname(self.db_path) if os.path.dirname(self.db_path) else '.', exist_ok=True)
         
         logger.info(f"Initialized SQLite-vec storage at: {self.db_path}")
-    
+
+    def _safe_json_loads(self, json_str: str, context: str = "") -> dict:
+        """Safely parse JSON with comprehensive error handling and logging."""
+        if not json_str:
+            return {}
+        try:
+            result = json.loads(json_str)
+            if not isinstance(result, dict):
+                logger.warning(f"Non-dict JSON in {context}: {type(result)}")
+                return {}
+            return result
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error in {context}: {e}, data: {json_str[:100]}...")
+            return {}
+        except TypeError as e:
+            logger.error(f"JSON type error in {context}: {e}")
+            return {}
+
     async def _execute_with_retry(self, operation: Callable, max_retries: int = 3, initial_delay: float = 0.1):
         """
         Execute a database operation with exponential backoff retry logic.
@@ -171,8 +188,18 @@ class SqliteVecMemoryStorage(MemoryStorage):
             if not SQLITE_VEC_AVAILABLE:
                 raise ImportError("sqlite-vec is not available. Install with: pip install sqlite-vec")
             
-            if not SENTENCE_TRANSFORMERS_AVAILABLE:
-                raise ImportError("sentence-transformers is not available. Install with: pip install sentence-transformers torch")
+            # Check if ONNX embeddings are enabled (preferred for Docker)
+            from ..config import USE_ONNX
+            if USE_ONNX:
+                logger.info("ONNX embeddings enabled - skipping sentence-transformers installation")
+                # ONNX embeddings don't require sentence-transformers, but we still need to initialize the database
+                # Continue with database initialization below
+                
+            # Check sentence-transformers availability (only if ONNX disabled)
+            if not USE_ONNX:
+                global SENTENCE_TRANSFORMERS_AVAILABLE
+                if not SENTENCE_TRANSFORMERS_AVAILABLE:
+                    raise ImportError("sentence-transformers is not available. Install with: pip install sentence-transformers torch")
             
             # Check if extension loading is supported
             extension_supported, support_message = self._check_extension_support()
@@ -623,7 +650,7 @@ SOLUTIONS:
                     
                     # Parse tags and metadata
                     tags = [tag.strip() for tag in tags_str.split(",") if tag.strip()] if tags_str else []
-                    metadata = json.loads(metadata_str) if metadata_str else {}
+                    metadata = self._safe_json_loads(metadata_str, "memory_metadata")
                     
                     # Create Memory object
                     memory = Memory(
@@ -689,7 +716,7 @@ SOLUTIONS:
                     
                     # Parse tags and metadata
                     memory_tags = [tag.strip() for tag in tags_str.split(",") if tag.strip()] if tags_str else []
-                    metadata = json.loads(metadata_str) if metadata_str else {}
+                    metadata = self._safe_json_loads(metadata_str, "memory_metadata")
                     
                     memory = Memory(
                         content=content,
@@ -751,7 +778,7 @@ SOLUTIONS:
                     
                     # Parse tags and metadata
                     memory_tags = [tag.strip() for tag in tags_str.split(",") if tag.strip()] if tags_str else []
-                    metadata = json.loads(metadata_str) if metadata_str else {}
+                    metadata = self._safe_json_loads(metadata_str, "memory_metadata")
                     
                     memory = Memory(
                         content=content,
@@ -773,12 +800,89 @@ SOLUTIONS:
             
             logger.info(f"Found {len(results)} memories with tags: {tags} (operation: {operation})")
             return results
-            
+
         except Exception as e:
             logger.error(f"Failed to search by tags with operation {operation}: {str(e)}")
             logger.error(traceback.format_exc())
             return []
-    
+
+    async def search_by_tag_chronological(self, tags: List[str], limit: int = None, offset: int = 0) -> List[Memory]:
+        """
+        Search memories by tags with chronological ordering and database-level pagination.
+
+        This method addresses Gemini Code Assist's performance concern by pushing
+        ordering and pagination to the database level instead of doing it in Python.
+
+        Args:
+            tags: List of tags to search for
+            limit: Maximum number of memories to return (None for all)
+            offset: Number of memories to skip (for pagination)
+
+        Returns:
+            List of Memory objects ordered by created_at DESC
+        """
+        try:
+            if not self.conn:
+                logger.error("Database not initialized")
+                return []
+
+            if not tags:
+                return []
+
+            # Build query for tag search (OR logic) with database-level ordering and pagination
+            tag_conditions = " OR ".join(["tags LIKE ?" for _ in tags])
+            tag_params = [f"%{tag}%" for tag in tags]
+
+            # Build pagination clauses
+            limit_clause = f"LIMIT {limit}" if limit is not None else ""
+            offset_clause = f"OFFSET {offset}" if offset > 0 else ""
+
+            query = f'''
+                SELECT content_hash, content, tags, memory_type, metadata,
+                       created_at, updated_at, created_at_iso, updated_at_iso
+                FROM memories
+                WHERE {tag_conditions}
+                ORDER BY created_at DESC
+                {limit_clause} {offset_clause}
+            '''
+
+            cursor = self.conn.execute(query, tag_params)
+            results = []
+
+            for row in cursor.fetchall():
+                try:
+                    content_hash, content, tags_str, memory_type, metadata_str, created_at, updated_at, created_at_iso, updated_at_iso = row
+
+                    # Parse tags and metadata
+                    memory_tags = [tag.strip() for tag in tags_str.split(",") if tag.strip()] if tags_str else []
+                    metadata = self._safe_json_loads(metadata_str, "memory_metadata")
+
+                    memory = Memory(
+                        content=content,
+                        content_hash=content_hash,
+                        tags=memory_tags,
+                        memory_type=memory_type,
+                        metadata=metadata,
+                        created_at=created_at,
+                        updated_at=updated_at,
+                        created_at_iso=created_at_iso,
+                        updated_at_iso=updated_at_iso
+                    )
+
+                    results.append(memory)
+
+                except Exception as parse_error:
+                    logger.warning(f"Failed to parse memory result: {parse_error}")
+                    continue
+
+            logger.info(f"Found {len(results)} memories with tags: {tags} using database-level pagination (limit={limit}, offset={offset})")
+            return results
+
+        except Exception as e:
+            logger.error(f"Failed to search by tags chronologically: {str(e)}")
+            logger.error(traceback.format_exc())
+            return []
+
     async def delete(self, content_hash: str) -> Tuple[bool, str]:
         """Delete a memory by its content hash."""
         try:
@@ -830,7 +934,7 @@ SOLUTIONS:
             
             # Parse tags and metadata
             tags = [tag.strip() for tag in tags_str.split(",") if tag.strip()] if tags_str else []
-            metadata = json.loads(metadata_str) if metadata_str else {}
+            metadata = self._safe_json_loads(metadata_str, "memory_retrieval")
             
             memory = Memory(
                 content=content,
@@ -929,7 +1033,7 @@ SOLUTIONS:
             content, current_tags, current_type, current_metadata_str, created_at, created_at_iso = row
             
             # Parse current metadata
-            current_metadata = json.loads(current_metadata_str) if current_metadata_str else {}
+            current_metadata = self._safe_json_loads(current_metadata_str, "update_memory_metadata")
             
             # Apply updates
             new_tags = current_tags
@@ -1135,7 +1239,7 @@ SOLUTIONS:
                             
                             # Parse tags and metadata
                             tags = [tag.strip() for tag in tags_str.split(",") if tag.strip()] if tags_str else []
-                            metadata = json.loads(metadata_str) if metadata_str else {}
+                            metadata = self._safe_json_loads(metadata_str, "memory_metadata")
                             
                             # Create Memory object
                             memory = Memory(
@@ -1196,7 +1300,7 @@ SOLUTIONS:
                     
                     # Parse tags and metadata
                     tags = [tag.strip() for tag in tags_str.split(",") if tag.strip()] if tags_str else []
-                    metadata = json.loads(metadata_str) if metadata_str else {}
+                    metadata = self._safe_json_loads(metadata_str, "memory_metadata")
                     
                     memory = Memory(
                         content=content,
@@ -1256,7 +1360,7 @@ SOLUTIONS:
                     
                     # Parse tags and metadata
                     tags = [tag.strip() for tag in tags_str.split(",") if tag.strip()] if tags_str else []
-                    metadata = json.loads(metadata_str) if metadata_str else {}
+                    metadata = self._safe_json_loads(metadata_str, "memory_metadata")
                     
                     memory = Memory(
                         content=content,
@@ -1303,7 +1407,7 @@ SOLUTIONS:
                     
                     # Parse tags and metadata
                     tags = [tag.strip() for tag in tags_str.split(",") if tag.strip()] if tags_str else []
-                    metadata = json.loads(metadata_str) if metadata_str else {}
+                    metadata = self._safe_json_loads(metadata_str, "memory_metadata")
                     
                     memory = Memory(
                         content=content,
@@ -1400,14 +1504,7 @@ SOLUTIONS:
                     tags = []
             
             # Parse metadata
-            metadata = {}
-            if metadata_str:
-                try:
-                    metadata = json.loads(metadata_str)
-                    if not isinstance(metadata, dict):
-                        metadata = {}
-                except json.JSONDecodeError:
-                    metadata = {}
+            metadata = self._safe_json_loads(metadata_str, "get_by_hash")
             
             return Memory(
                 content=content,
@@ -1425,33 +1522,53 @@ SOLUTIONS:
             logger.error(f"Error converting row to memory: {str(e)}")
             return None
 
-    async def get_all_memories(self, limit: int = None, offset: int = 0) -> List[Memory]:
+    async def get_all_memories(self, limit: int = None, offset: int = 0, memory_type: Optional[str] = None, tags: Optional[List[str]] = None) -> List[Memory]:
         """
         Get all memories in storage ordered by creation time (newest first).
-        
+
         Args:
             limit: Maximum number of memories to return (None for all)
             offset: Number of memories to skip (for pagination)
-            
+            memory_type: Optional filter by memory type
+            tags: Optional filter by tags (matches ANY of the provided tags)
+
         Returns:
-            List of Memory objects ordered by created_at DESC
+            List of Memory objects ordered by created_at DESC, optionally filtered by type and tags
         """
         try:
             await self.initialize()
-            
-            # Build query with optional limit and offset
+
+            # Build query with optional memory_type and tags filters
             query = '''
                 SELECT content_hash, content, tags, memory_type, metadata,
                        created_at, updated_at, created_at_iso, updated_at_iso
                 FROM memories
-                ORDER BY created_at DESC
             '''
-            
+
             params = []
+            where_conditions = []
+
+            # Add memory_type filter if specified
+            if memory_type is not None:
+                where_conditions.append('memory_type = ?')
+                params.append(memory_type)
+
+            # Add tags filter if specified (using database-level filtering like search_by_tag_chronological)
+            if tags and len(tags) > 0:
+                tag_conditions = " OR ".join(["tags LIKE ?" for _ in tags])
+                where_conditions.append(f"({tag_conditions})")
+                params.extend([f"%{tag}%" for tag in tags])
+
+            # Apply WHERE clause if we have any conditions
+            if where_conditions:
+                query += ' WHERE ' + ' AND '.join(where_conditions)
+
+            query += ' ORDER BY created_at DESC'
+
             if limit is not None:
                 query += ' LIMIT ?'
                 params.append(limit)
-                
+
             if offset > 0:
                 query += ' OFFSET ?'
                 params.append(offset)
@@ -1482,20 +1599,27 @@ SOLUTIONS:
         """
         return await self.get_all_memories(limit=n, offset=0)
 
-    async def count_all_memories(self) -> int:
+    async def count_all_memories(self, memory_type: Optional[str] = None) -> int:
         """
         Get total count of memories in storage.
-        
+
+        Args:
+            memory_type: Optional filter by memory type
+
         Returns:
-            Total number of memories
+            Total number of memories, optionally filtered by type
         """
         try:
             await self.initialize()
-            
-            cursor = self.conn.execute('SELECT COUNT(*) FROM memories')
+
+            if memory_type is not None:
+                cursor = self.conn.execute('SELECT COUNT(*) FROM memories WHERE memory_type = ?', (memory_type,))
+            else:
+                cursor = self.conn.execute('SELECT COUNT(*) FROM memories')
+
             result = cursor.fetchone()
             return result[0] if result else 0
-            
+
         except Exception as e:
             logger.error(f"Error counting memories: {str(e)}")
             return 0

@@ -142,7 +142,7 @@ class CloudflareStorage(MemoryStorage):
     async def _generate_embedding(self, text: str) -> List[float]:
         """Generate embedding using Workers AI or cache."""
         # Check cache first
-        text_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
+        text_hash = hashlib.sha256(text.encode()).hexdigest()
         if text_hash in self._embedding_cache:
             return self._embedding_cache[text_hash]
         
@@ -341,11 +341,13 @@ class CloudflareStorage(MemoryStorage):
                 headers=headers
             )
             
-            # Log the full response for debugging
+            # Log response status for debugging (avoid logging headers/body for security)
             logger.info(f"Vectorize response status: {response.status_code}")
-            logger.info(f"Vectorize response headers: {dict(response.headers)}")
             response_text = response.text
-            logger.info(f"Vectorize response body: {response_text}")
+            if response.status_code != 200:
+                # Only log response body on errors, and truncate to avoid credential exposure
+                truncated_response = response_text[:200] + "..." if len(response_text) > 200 else response_text
+                logger.warning(f"Vectorize error response (truncated): {truncated_response}")
             
             if response.status_code != 200:
                 raise ValueError(f"HTTP {response.status_code}: {response_text}")
@@ -908,13 +910,238 @@ class CloudflareStorage(MemoryStorage):
         # Return JSON string representation of the array
         return json.dumps(tags)
     
+    async def recall(self, query: Optional[str] = None, n_results: int = 5, start_timestamp: Optional[float] = None, end_timestamp: Optional[float] = None) -> List[MemoryQueryResult]:
+        """
+        Retrieve memories with combined time filtering and optional semantic search.
+
+        Args:
+            query: Optional semantic search query. If None, only time filtering is applied.
+            n_results: Maximum number of results to return.
+            start_timestamp: Optional start time for filtering.
+            end_timestamp: Optional end time for filtering.
+
+        Returns:
+            List of MemoryQueryResult objects.
+        """
+        try:
+            # Build time filtering WHERE clause for D1
+            time_conditions = []
+            params = []
+
+            if start_timestamp is not None:
+                time_conditions.append("created_at >= ?")
+                params.append(float(start_timestamp))
+
+            if end_timestamp is not None:
+                time_conditions.append("created_at <= ?")
+                params.append(float(end_timestamp))
+
+            time_where = " AND ".join(time_conditions) if time_conditions else ""
+
+            logger.info(f"Recall - Time filtering conditions: {time_where}, params: {params}")
+
+            # Determine search strategy
+            if query and query.strip():
+                # Combined semantic search with time filtering
+                logger.info(f"Recall - Using semantic search with query: '{query}'")
+
+                try:
+                    # Generate query embedding
+                    query_embedding = await self._generate_embedding(query)
+
+                    # Search Vectorize with semantic query
+                    search_payload = {
+                        "vector": query_embedding,
+                        "topK": n_results,
+                        "returnMetadata": "all",
+                        "returnValues": False
+                    }
+
+                    # Add time filtering to vectorize metadata if specified
+                    if time_conditions:
+                        # Note: Vectorize metadata filtering capabilities may be limited
+                        # We'll filter after retrieval for now
+                        logger.info("Recall - Time filtering will be applied post-retrieval from Vectorize")
+
+                    response = await self._retry_request("POST", f"{self.vectorize_url}/query", json=search_payload)
+                    result = response.json()
+
+                    if not result.get("success"):
+                        raise ValueError(f"Vectorize query failed: {result}")
+
+                    matches = result.get("result", {}).get("matches", [])
+
+                    # Convert matches to MemoryQueryResult objects with time filtering
+                    results = []
+                    for match in matches:
+                        memory = await self._load_memory_from_match(match)
+                        if memory:
+                            # Apply time filtering if needed
+                            if start_timestamp is not None and memory.created_at and memory.created_at < start_timestamp:
+                                continue
+                            if end_timestamp is not None and memory.created_at and memory.created_at > end_timestamp:
+                                continue
+
+                            query_result = MemoryQueryResult(
+                                memory=memory,
+                                relevance_score=match.get("score", 0.0)
+                            )
+                            results.append(query_result)
+
+                    logger.info(f"Recall - Retrieved {len(results)} memories with semantic search and time filtering")
+                    return results[:n_results]  # Ensure we don't exceed n_results
+
+                except Exception as e:
+                    logger.error(f"Recall - Semantic search failed, falling back to time-based search: {e}")
+                    # Fall through to time-based search
+
+            # Time-based search only (or fallback)
+            logger.info(f"Recall - Using time-based search only")
+
+            # Build D1 query for time-based retrieval
+            if time_where:
+                sql = f"SELECT * FROM memories WHERE {time_where} ORDER BY created_at DESC LIMIT ?"
+                params.append(n_results)
+            else:
+                # No time filters, get most recent
+                sql = "SELECT * FROM memories ORDER BY created_at DESC LIMIT ?"
+                params = [n_results]
+
+            payload = {"sql": sql, "params": params}
+            response = await self._retry_request("POST", f"{self.d1_url}/query", json=payload)
+            result = response.json()
+
+            if not result.get("success"):
+                raise ValueError(f"D1 query failed: {result}")
+
+            # Convert D1 results to MemoryQueryResult objects
+            results = []
+            if result.get("result", [{}])[0].get("results"):
+                for row in result["result"][0]["results"]:
+                    memory = await self._load_memory_from_row(row)
+                    if memory:
+                        # For time-based search without semantic query, use timestamp as relevance
+                        relevance_score = memory.created_at or 0.0
+                        query_result = MemoryQueryResult(
+                            memory=memory,
+                            relevance_score=relevance_score
+                        )
+                        results.append(query_result)
+
+            logger.info(f"Recall - Retrieved {len(results)} memories with time-based search")
+            return results
+
+        except Exception as e:
+            logger.error(f"Recall failed: {e}")
+            return []
+
+    async def get_all_memories(self, limit: int = None, offset: int = 0, memory_type: Optional[str] = None, tags: Optional[List[str]] = None) -> List[Memory]:
+        """
+        Get all memories in storage ordered by creation time (newest first).
+
+        Args:
+            limit: Maximum number of memories to return (None for all)
+            offset: Number of memories to skip (for pagination)
+            memory_type: Optional filter by memory type
+            tags: Optional filter by tags (matches ANY of the provided tags)
+
+        Returns:
+            List of Memory objects ordered by created_at DESC, optionally filtered by type and tags
+        """
+        try:
+            # Build SQL query with optional memory_type and tags filters
+            sql = "SELECT * FROM memories"
+            params = []
+            where_conditions = []
+
+            # Add memory_type filter if specified
+            if memory_type is not None:
+                where_conditions.append("memory_type = ?")
+                params.append(memory_type)
+
+            # Add tags filter if specified (using LIKE for tag matching)
+            if tags and len(tags) > 0:
+                tag_conditions = " OR ".join(["tags LIKE ?" for _ in tags])
+                where_conditions.append(f"({tag_conditions})")
+                params.extend([f"%{tag}%" for tag in tags])
+
+            # Apply WHERE clause if we have any conditions
+            if where_conditions:
+                sql += " WHERE " + " AND ".join(where_conditions)
+
+            sql += " ORDER BY created_at DESC"
+
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+
+            if offset > 0:
+                sql += " OFFSET ?"
+                params.append(offset)
+
+            payload = {"sql": sql, "params": params}
+            response = await self._retry_request("POST", f"{self.d1_url}/query", json=payload)
+            result = response.json()
+
+            if not result.get("success"):
+                raise ValueError(f"D1 query failed: {result}")
+
+            memories = []
+            if result.get("result", [{}])[0].get("results"):
+                for row in result["result"][0]["results"]:
+                    memory = await self._load_memory_from_row(row)
+                    if memory:
+                        memories.append(memory)
+
+            logger.debug(f"Retrieved {len(memories)} memories from D1")
+            return memories
+
+        except Exception as e:
+            logger.error(f"Error getting all memories: {str(e)}")
+            return []
+
+    async def count_all_memories(self, memory_type: Optional[str] = None) -> int:
+        """
+        Get total count of memories in storage.
+
+        Args:
+            memory_type: Optional filter by memory type
+
+        Returns:
+            Total number of memories, optionally filtered by type
+        """
+        try:
+            if memory_type is not None:
+                sql = "SELECT COUNT(*) as count FROM memories WHERE memory_type = ?"
+                params = [memory_type]
+            else:
+                sql = "SELECT COUNT(*) as count FROM memories"
+                params = []
+
+            payload = {"sql": sql, "params": params}
+            response = await self._retry_request("POST", f"{self.d1_url}/query", json=payload)
+            result = response.json()
+
+            if not result.get("success"):
+                raise ValueError(f"D1 query failed: {result}")
+
+            if result.get("result", [{}])[0].get("results"):
+                count = result["result"][0]["results"][0].get("count", 0)
+                return int(count)
+
+            return 0
+
+        except Exception as e:
+            logger.error(f"Error counting memories: {str(e)}")
+            return 0
+
     async def close(self) -> None:
         """Close the storage backend and cleanup resources."""
         if self.client:
             await self.client.aclose()
             self.client = None
-        
+
         # Clear embedding cache
         self._embedding_cache.clear()
-        
+
         logger.info("Cloudflare storage backend closed")

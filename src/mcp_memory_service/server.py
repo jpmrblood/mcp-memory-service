@@ -53,7 +53,8 @@ def detect_mcp_client():
                     return 'claude_desktop'
                 if 'lmstudio' in cmdline_str or 'lm-studio' in cmdline_str:
                     return 'lm_studio'
-            except:
+            except (OSError, IndexError, AttributeError) as e:
+                logger.debug(f"Could not detect client from process: {e}")
                 pass
         
         # Fallback: check environment variables
@@ -830,8 +831,12 @@ class MemoryServer:
                         description=f"All memories with tag '{tag}'",
                         mimeType="application/json"
                     ))
-            except:
-                pass  # If get_all_tags not available, skip
+            except AttributeError:
+                # get_all_tags method not available on this storage backend
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to load tag resources: {e}")
+                pass
             
             return resources
         
@@ -2325,100 +2330,146 @@ class MemoryServer:
     async def handle_dashboard_get_stats(self, arguments: dict) -> List[types.TextContent]:
         """Dashboard version that returns database statistics as JSON."""
         logger.info("=== EXECUTING DASHBOARD_GET_STATS ===")
+        
+        # Initialize storage using the configured backend (like health check does)
         try:
-            # Get real stats by initializing ChromaDB (now that we know it works)
-            import os
-            
-            # Check if ChromaDB directory exists and get basic info
-            chroma_exists = os.path.exists(CHROMA_PATH)
-            chroma_size = "unknown"
-            total_memories = 0
-            unique_tags = 0
-            last_updated = "unknown"
-            
-            if chroma_exists:
-                try:
-                    total_size = 0
-                    for dirpath, dirnames, filenames in os.walk(CHROMA_PATH):
-                        for filename in filenames:
-                            filepath = os.path.join(dirpath, filename)
-                            if os.path.exists(filepath):
-                                total_size += os.path.getsize(filepath)
-                    chroma_size = f"{total_size / (1024*1024):.2f} MB"
-                except:
-                    chroma_size = "calculation_failed"
-                
-                # Get real stats by initializing ChromaDB
-                try:
-                    logger.info("Initializing storage to get real stats...")
-                    storage = await self._ensure_storage_initialized()
+            storage = await self._ensure_storage_initialized()
+        except Exception as init_error:
+            logger.error(f"Storage initialization failed: {str(init_error)}")
+            result = {
+                "total_memories": 0,
+                "unique_tags": 0,
+                "database_size": "unknown",
+                "database_path": "unknown",
+                "database_exists": False,
+                "last_updated": "unknown",
+                "note": f"Storage initialization failed: {str(init_error)}"
+            }
+            return [types.TextContent(type="text", text=json.dumps(result))]
+        
+        # Get storage type for backend-specific handling (same pattern as health check)
+        storage_type = storage.__class__.__name__
+        logger.info(f"Using storage backend: {storage_type}")
+        
+        # Initialize default values
+        total_memories = 0
+        unique_tags = 0
+        database_size = "unknown"
+        database_path = "unknown"
+        database_exists = False
+        last_updated = "unknown"
+        
+        # Backend-specific stats gathering
+        try:
+            if storage_type == "SqliteVecMemoryStorage":
+                # SQLite-vec backend stats
+                if hasattr(storage, 'conn') and storage.conn is not None:
+                    # Count memories
+                    cursor = storage.conn.execute('SELECT COUNT(*) FROM memories')
+                    total_memories = cursor.fetchone()[0]
                     
-                    # Get database statistics using the utility function
-                    from .utils.db_utils import get_database_stats
-                    stats = get_database_stats(storage)
+                    # Count unique tags
+                    cursor = storage.conn.execute('SELECT DISTINCT tags FROM memories WHERE tags IS NOT NULL AND tags != ""')
+                    all_tag_strings = [row[0] for row in cursor.fetchall()]
+                    all_tags = set()
+                    for tag_string in all_tag_strings:
+                        if tag_string:
+                            tags = [tag.strip() for tag in tag_string.split(',') if tag.strip()]
+                            all_tags.update(tags)
+                    unique_tags = len(all_tags)
                     
-                    # Extract stats from the nested structure
-                    collection_stats = stats.get("collection", {})
-                    total_memories = collection_stats.get("total_memories", 0)
-                    
-                    # Calculate unique tags by getting all memories and counting unique tags
-                    try:
-                        # Get all memories to count unique tags
-                        all_data = storage.collection.get()
-                        if all_data and all_data.get("metadatas"):
-                            all_tags = set()
-                            for metadata in all_data["metadatas"]:
-                                if metadata and isinstance(metadata, dict):
-                                    tags = metadata.get("tags", [])
-                                    if isinstance(tags, list):
-                                        all_tags.update(tags)
-                                    elif isinstance(tags, str):
-                                        # Handle comma-separated string tags
-                                        tag_list = [tag.strip() for tag in tags.split(",") if tag.strip()]
-                                        all_tags.update(tag_list)
-                            unique_tags = len(all_tags)
-                        else:
-                            unique_tags = 0
-                    except Exception as tag_error:
-                        logger.warning(f"Could not count unique tags: {str(tag_error)}")
-                        unique_tags = 0
-                    
+                    # Get database file info
+                    if hasattr(storage, 'db_path') and storage.db_path:
+                        database_path = storage.db_path
+                        if os.path.exists(database_path):
+                            database_exists = True
+                            file_size = os.path.getsize(database_path)
+                            database_size = f"{file_size / (1024*1024):.2f} MB"
+                            
                     last_updated = "recently" if total_memories > 0 else "unknown"
                     
-                    logger.info(f"Retrieved real stats: {total_memories} memories, {unique_tags} unique tags")
+                    logger.info(f"SQLite-vec stats: {total_memories} memories, {unique_tags} unique tags")
                     
-                except Exception as e:
-                    logger.warning(f"Could not get detailed stats: {str(e)}")
-                    # If stats fail but search works, try a simple count via storage
-                    try:
-                        if hasattr(self, 'storage') and self.storage and self._storage_initialized:
-                            # Try to get basic count from initialized storage
-                            collection = self.storage.collection
-                            if collection:
-                                count_result = collection.count()
-                                total_memories = count_result if isinstance(count_result, int) else 0
-                                logger.info(f"Got basic count from collection: {total_memories}")
-                    except Exception as e2:
-                        logger.warning(f"Basic count also failed: {str(e2)}")
+                else:
+                    logger.warning("SQLite connection not available")
+                    
+            elif storage_type == "CloudflareStorage":
+                # Cloudflare backend stats
+                if hasattr(storage, 'get_stats'):
+                    cloudflare_stats = await storage.get_stats()
+                    total_memories = cloudflare_stats.get("total_memories", 0)
+                    unique_tags = cloudflare_stats.get("unique_tags", 0)
+                    database_size = cloudflare_stats.get("database_size", "unknown")
+                    database_path = f"Cloudflare D1: {storage.d1_database_id}" if hasattr(storage, 'd1_database_id') else "Cloudflare"
+                    database_exists = True
+                    last_updated = "recently" if total_memories > 0 else "unknown"
+                    
+                    logger.info(f"Cloudflare stats: {total_memories} memories, {unique_tags} unique tags")
+                else:
+                    logger.warning("Cloudflare storage doesn't support get_stats")
+                    
+            elif hasattr(storage, 'collection'):
+                # ChromaDB backend stats (legacy/fallback)
+                if storage.collection is not None:
+                    # Get all memories to count them and extract tags
+                    total_memories = storage.collection.count()
+                    all_data = storage.collection.get(include=["metadatas"])
+                    if all_data and all_data.get("metadatas"):
+                        
+                        # Count unique tags
+                        all_tags = set()
+                        for metadata in all_data["metadatas"]:
+                            if metadata and isinstance(metadata, dict):
+                                tags = metadata.get("tags", [])
+                                if isinstance(tags, list):
+                                    all_tags.update(tags)
+                                elif isinstance(tags, str):
+                                    tag_list = [tag.strip() for tag in tags.split(",") if tag.strip()]
+                                    all_tags.update(tag_list)
+                        unique_tags = len(all_tags)
+                        
+                    # Get ChromaDB directory info
+                    database_path = CHROMA_PATH
+                    if os.path.exists(CHROMA_PATH):
+                        database_exists = True
+                        try:
+                            total_size = 0
+                            for dirpath, dirnames, filenames in os.walk(CHROMA_PATH):
+                                for filename in filenames:
+                                    filepath = os.path.join(dirpath, filename)
+                                    if os.path.exists(filepath):
+                                        total_size += os.path.getsize(filepath)
+                            database_size = f"{total_size / (1024*1024):.2f} MB"
+                        except Exception:
+                            database_size = "calculation_failed"
+                            
+                    last_updated = "recently" if total_memories > 0 else "unknown"
+                    
+                    logger.info(f"ChromaDB stats: {total_memories} memories, {unique_tags} unique tags")
+                    
+                else:
+                    logger.warning("ChromaDB collection not initialized")
             
-            # Format for dashboard with proper numeric types
-            result = {
-                "total_memories": total_memories,  # Always a number
-                "unique_tags": unique_tags,        # Always a number
-                "database_size": chroma_size,
-                "database_path": CHROMA_PATH,
-                "database_exists": chroma_exists,
-                "last_updated": last_updated,
-                "note": "Stats loaded successfully" if total_memories > 0 else "Database exists but appears empty"
-            }
-            
-            logger.info(f"Returning stats: {result}")
-            return [types.TextContent(type="text", text=json.dumps(result))]
-            
-        except Exception as e:
-            logger.error(f"Error in dashboard_get_stats: {str(e)}")
-            result = {"error": str(e), "total_memories": 0, "unique_tags": 0}
-            return [types.TextContent(type="text", text=json.dumps(result))]
+            else:
+                logger.warning(f"Unknown storage type: {storage_type}")
+                
+        except Exception as stats_error:
+            logger.error(f"Error gathering backend stats: {str(stats_error)}")
+            # Keep default values but log the error
+        
+        # Format for dashboard with proper numeric types
+        result = {
+            "total_memories": total_memories,  # Always a number
+            "unique_tags": unique_tags,        # Always a number  
+            "database_size": database_size,
+            "database_path": database_path,
+            "database_exists": database_exists,
+            "last_updated": last_updated,
+            "note": "Stats loaded successfully" if total_memories > 0 else "Database exists but appears empty"
+        }
+        
+        logger.info(f"Returning stats: {result}")
+        return [types.TextContent(type="text", text=json.dumps(result))]
 
     async def handle_dashboard_optimize_db(self, arguments: dict) -> List[types.TextContent]:
         """Dashboard version that optimizes database and returns JSON with progress tracking."""
@@ -2680,12 +2731,16 @@ class MemoryServer:
             
             formatted_results = []
             for i, result in enumerate(results):
-                memory_info = [
-                    f"Memory {i+1}:",
+                memory_info = [f"Memory {i+1}:"]
+                timestamp = getattr(result.memory, "timestamp", None)
+                if timestamp:
+                    memory_info.append(f"Timestamp: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+
+                memory_info.extend([
                     f"Content: {result.memory.content}",
                     f"Hash: {result.memory.content_hash}",
                     f"Relevance Score: {result.relevance_score:.2f}"
-                ]
+                ])
                 if result.memory.tags:
                     memory_info.append(f"Tags: {', '.join(result.memory.tags)}")
                 memory_info.append("---")
@@ -2719,12 +2774,16 @@ class MemoryServer:
             
             formatted_results = []
             for i, memory in enumerate(memories):
-                memory_info = [
-                    f"Memory {i+1}:",
+                memory_info = [f"Memory {i+1}:"]
+                timestamp = getattr(memory, "timestamp", None)
+                if timestamp:
+                    memory_info.append(f"Timestamp: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+
+                memory_info.extend([
                     f"Content: {memory.content}",
                     f"Hash: {memory.content_hash}",
                     f"Tags: {', '.join(memory.tags)}"
-                ]
+                ])
                 if memory.memory_type:
                     memory_info.append(f"Type: {memory.memory_type}")
                 memory_info.append("---")
@@ -3758,12 +3817,20 @@ Memories Archived: {report.memories_archived}"""
             logger.info(f"Starting document ingestion: {file_path}")
             start_time = time.time()
             
-            # Get appropriate document loader
-            loader = get_loader_for_file(file_path)
-            if loader is None:
+            # Validate file exists and get appropriate document loader
+            if not file_path.exists():
                 return [types.TextContent(
                     type="text",
-                    text=f"Error: Unsupported file format: {file_path.suffix}"
+                    text=f"Error: File not found: {file_path.resolve()}"
+                )]
+
+            loader = get_loader_for_file(file_path)
+            if loader is None:
+                from .ingestion import SUPPORTED_FORMATS
+                supported_exts = ", ".join(f".{ext}" for ext in SUPPORTED_FORMATS.keys())
+                return [types.TextContent(
+                    type="text",
+                    text=f"Error: Unsupported file format: {file_path.suffix}. Supported formats: {supported_exts}"
                 )]
             
             # Configure loader
